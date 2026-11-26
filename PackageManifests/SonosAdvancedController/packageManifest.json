@@ -16,6 +16,22 @@
       "name": "Sonos Advanced Controller - Discovery & Management",
       "namespace": "dwinks",
       "required": false
+    },
+    {
+      "id": "45ee968f-ce6c-459f-91c1-108d7d572a3b",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.18.9/SonosAdvancedFavoritesApp.groovy",
+      "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Apps/SonosAdvancedFavoritesApp.groovy",
+      "name": "Sonos Advanced Controller - Favorites",
+      "namespace": "dwinks",
+      "required": true
+    },
+    {
+      "id": "a9149b1b-9ad4-41f7-808c-495988756a7d",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.18.9/SonosAdvancedPlaylistsApp.groovy",
+      "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Apps/SonosAdvancedPlaylistsApp.groovy",
+      "name": "Sonos Advanced Controller - Playlists",
+      "namespace": "dwinks",
+      "required": true
     }
   ],
   "author": "Daniel Winks",

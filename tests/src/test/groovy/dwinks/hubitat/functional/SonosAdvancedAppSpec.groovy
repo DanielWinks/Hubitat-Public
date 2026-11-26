@@ -2925,7 +2925,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     page.title == 'Sonos Advanced Controller'
-    appScript.app.childApps.size() == 1
+    appScript.app.childApps.size() == 3
     appScript.pageHrefs.any { List args ->
       args[0] instanceof Map && args[0].url == '/installedapp/configure/134/discoveryPage'
     }
@@ -2946,8 +2946,105 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     page.title == 'Sonos Advanced Controller'
     reopenedPage.title == 'Sonos Advanced Controller'
-    appScript.app.childApps.size() == 1
+    appScript.app.childApps.size() == 3
     appScript.pageHrefs.count { List args -> args[0] instanceof Map && args[0].url == '/installedapp/configure/134/discoveryPage' } == 2
+  }
+
+  def "catalog child apps are created unconditionally with their exact names and linked from the main page"() {
+    given:
+    appScript.settings.putAll([autoCheckUpdates: false, autoInstallUpdates: false])
+    appScript.binding.setVariable('autoCheckUpdates', false)
+    appScript.binding.setVariable('autoInstallUpdates', false)
+
+    when:
+    appScript.mainPage()
+    appScript.mainPage()
+
+    then:
+    appScript.app.childApps*.name.sort() == ['Sonos Advanced Controller - Discovery & Management',
+      'Sonos Advanced Controller - Favorites', 'Sonos Advanced Controller - Playlists']
+    appScript.app.childApps.findAll { it.name.endsWith(' - Favorites') || it.name.endsWith(' - Playlists') }.every { it.label == it.name }
+    appScript.pageHrefs.any { List args -> args[0] instanceof Map && args[0].url?.endsWith('/mainPage') && args[0].title == 'Sonos Favorites' }
+    appScript.pageHrefs.any { List args -> args[0] instanceof Map && args[0].url?.endsWith('/mainPage') && args[0].title == 'Sonos Playlists' }
+  }
+
+  def "existing catalog children with the old short labels are relabeled to their full names"() {
+    given:
+    appScript.app.childApps << new dwinks.hubitat.stubs.MockInstalledApp(id: 960L, name: 'Sonos Advanced Controller - Favorites', label: 'Sonos Favorites')
+
+    when:
+    appScript.ensureCatalogChild('Sonos Advanced Controller - Favorites')
+
+    then:
+    appScript.app.childApps.find { it.id == '960' || it.name.endsWith('- Favorites') }.label == 'Sonos Advanced Controller - Favorites'
+  }
+
+  def "configure clears the retired daily refresh instead of scheduling it"() {
+    given:
+    appScript.app.metaClass.getName = { -> 'Sonos Advanced Controller' }
+
+    when:
+    appScript.configure(false)
+
+    then:
+    appScript.unschedules.contains('refreshFavoritesAndPlaylists')
+    !appScript.scheduled.any { List job -> job[1] == 'refreshFavoritesAndPlaylists' }
+    !appScript.metaClass.respondsTo(appScript, 'refreshFavoritesAndPlaylists')
+    appScript.app.childApps*.name.containsAll(['Sonos Advanced Controller - Favorites', 'Sonos Advanced Controller - Playlists'])
+  }
+
+  def "catalog snapshots are queued and delivered to the matching child app"() {
+    given:
+    List<Map> delivered = []
+    Map namedChildren = [:]
+    ['Sonos Advanced Controller - Favorites', 'Sonos Advanced Controller - Playlists'].each { String childName ->
+      def child = new dwinks.hubitat.stubs.MockInstalledApp(id: 900L + namedChildren.size(), name: childName)
+      child.metaClass.storeCatalogSnapshot = { List<Map> records, String dni = null -> delivered << [child: childName, records: records, dni: dni] }
+      namedChildren[childName] = child
+      appScript.app.childApps << child
+    }
+
+    when:
+    appScript.putCatalogSnapshot('PLAYER-1', 'playlists', [[id: '7', name: 'Mix', imageUrl: '']])
+
+    then:
+    delivered.isEmpty()
+    appScript.scheduled.any { List job -> job[1] == 'drainCatalogSnapshots' }
+
+    when:
+    appScript.drainCatalogSnapshots()
+
+    then:
+    delivered == [[child: 'Sonos Advanced Controller - Playlists', records: [[id: '7', name: 'Mix', imageUrl: '']], dni: 'PLAYER-1']]
+    appScript.state.pendingCatalogSnapshots == null
+  }
+
+  def "catalog snapshots are retained and retried when the child app cannot accept them"() {
+    given:
+    List<Map> delivered = []
+    def child = new dwinks.hubitat.stubs.MockInstalledApp(id: 950L, name: 'Sonos Advanced Controller - Playlists')
+    int attempts = 0
+    child.metaClass.storeCatalogSnapshot = { List<Map> records, String dni = null ->
+      attempts++
+      if(attempts == 1) { throw new IllegalStateException('child busy') }
+      delivered << [records: records]
+    }
+    appScript.app.childApps << child
+    appScript.putCatalogSnapshot('PLAYER-1', 'playlists', [[id: '7', name: 'Mix', imageUrl: '']])
+
+    when:
+    appScript.drainCatalogSnapshots()
+
+    then:
+    appScript.state.pendingCatalogSnapshots.playlists.records*.id == ['7']
+    appScript.scheduled.any { List job -> job[1] == 'drainCatalogSnapshots' && job[0] == 60 }
+
+    when:
+    appScript.drainCatalogSnapshots()
+
+    then:
+    delivered*.records == [[[id: '7', name: 'Mix', imageUrl: '']]]
+    appScript.state.pendingCatalogSnapshots == null
   }
 
   def "management snapshot exposes detached player and group rows without a parent table cache"() {

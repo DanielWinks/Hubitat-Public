@@ -122,35 +122,188 @@ class SonosAdvPlayerSpec extends Specification {
     matchEvents.find { Map event -> event.name == 'currentFavorite' }.value.contains('Favorite #14 Peepers On Crane Pond')
   }
 
-  def "ContentDirectory updates refresh only the changed active catalog over UPnP"() {
+  def "ContentDirectory notifications are ignored by players that are not the elected catalog refresher"() {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.50'
+    String favoritesEvent = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><FavoritesUpdateID>RINCON_TEST,101</FavoritesUpdateID></e:property></e:propertyset>'
+
+    when:
+    driver.runtimeState.catalogRefreshOwner = false
+    driver.handleContentDirectoryPayload(favoritesEvent)
+    driver.refreshUpnpMediaCatalogs()
+
+    then:
+    driver.asyncCalls.isEmpty()
+  }
+
+  def "non-elected players invalidate stale local catalogs and refresh their own catalog children"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.runtimeState.catalogRefreshOwner = false
+    seedUpnpFavorite('1')
+    seedUpnpPlaylist('7')
+    String event = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><FavoritesUpdateID>R,2</FavoritesUpdateID></e:property></e:propertyset>'
+
+    when:
+    driver.handleContentDirectoryPayload(event)
+
+    then:
+    driver.getFavoritesMap().isEmpty()
+    !driver.getPlaylistsMap().isEmpty()
+    driver.asyncCalls.isEmpty()
+
+    when:
+    driver.settings.createFavoritesChildDevice = true
     driver.children << new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getFavoritesChildDNI())
-    driver.children << new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getPlaylistChildDNI())
+    driver.handleContentDirectoryPayload(event)
+
+    then:
+    driver.asyncCalls*.cb == ['favoritesBrowseCallback']
+  }
+
+  def "failed catalog relay to the parent is requeued and retried"() {
+    given:
+    int calls = 0
+    driver.metaClass.getParent = { -> new Expando(
+      putCatalogSnapshot: { String dni, String type, List<Map> records -> calls++; if(calls == 1) { throw new IllegalStateException('timeout') } }) }
+    driver.device.metaClass.getIdAsLong = { -> 1L }
+    driver.enqueueCatalogSnapshot('favorites', [[id: '3', name: 'Fav', imageUrl: '']])
+
+    when:
+    driver.relayCatalogSnapshotsToParent()
+
+    then:
+    calls == 1
+    driver.scheduled.any { List row -> row[1] == 'relayCatalogSnapshotsToParent' && row[0] == 30000 }
+
+    when:
+    driver.relayCatalogSnapshotsToParent()
+
+    then:
+    calls == 2
+    driver.getRuntimeState().get('pendingCatalogSnapshots') == null
+  }
+
+  def "ContentDirectory notifications refresh only the matching catalog without child devices"() {
+    given:
+    driver.runtimeState.catalogRefreshOwner = true
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     String favoritesEvent = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><FavoritesUpdateID>RINCON_TEST,101</FavoritesUpdateID></e:property></e:propertyset>'
     String playlistsEvent = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><SavedQueuesUpdateID>RINCON_TEST,33</SavedQueuesUpdateID></e:property></e:propertyset>'
 
     when:
     driver.handleContentDirectoryPayload(favoritesEvent)
+
+    then:
+    driver.asyncCalls*.cb == ['favoritesBrowseCallback']
+    driver.asyncCalls[0].params.body.contains('<ObjectID>FV:2</ObjectID>')
+
+    when:
     driver.handleContentDirectoryPayload(playlistsEvent)
 
     then:
     driver.asyncCalls*.cb == ['favoritesBrowseCallback', 'playlistsBrowseCallback']
-    driver.asyncCalls[0].params.body.contains('<ObjectID>FV:2</ObjectID>')
     driver.asyncCalls[1].params.body.contains('<ObjectID>SQ:</ObjectID>')
   }
 
-  def "ContentDirectory subscription is active when a favorite or playlist child exists"() {
+  def "ContentDirectory subscription is issued without favorites or playlist child devices"() {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.50'
-    driver.children << new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getFavoritesChildDNI())
 
     when:
     driver.subscribeToContentDirectory()
 
     then:
-    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'sid6'
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'contentDirectory'
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.operation == 'subscribe'
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.eventUrl == '/MediaServer/ContentDirectory/Event'
+  }
+
+  def "ContentDirectory renewal is issued without favorites or playlist child devices"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.device.dataValues.contentDirectorySubscriptionId = 'uuid:cd-sid'
+    driver.eventTimestamps.put("${driver.getDeviceDNI()}-contentDirectory-expires".toString(), (System.currentTimeMillis() / 1000 as long) + 3600L)
+
+    when:
+    driver.resubscribeToContentDirectory()
+
+    then:
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'contentDirectory'
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.operation == 'renew'
+  }
+
+  def "ContentDirectory subscription stores its SID under descriptive device data keys"() {
+    expect:
+    driver.subscriptionIdDataKey('contentDirectory') == 'contentDirectorySubscriptionId'
+    driver.subscriptionExpiryDataKey('contentDirectory') == 'contentDirectorySubscriptionExpires'
+
+    when:
+    driver.setSid('contentDirectory', 'uuid:new')
+
+    then:
+    driver.device.dataValues.contentDirectorySubscriptionId == 'uuid:new'
+    !driver.device.dataValues.containsKey('sid6')
+  }
+
+  def "legacy sid6 ContentDirectory values are migrated and removed during initialization cleanup"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.device.dataValues.sid6 = 'uuid:legacy'
+    driver.device.dataValues['sid6-expires'] = 'Thu Nov 26 2026'
+
+    when:
+    driver.migrateLegacyContentDirectorySubscription()
+
+    then:
+    driver.device.dataValues.contentDirectorySubscriptionId == 'uuid:legacy'
+    !driver.device.dataValues.containsKey('sid6')
+    !driver.device.dataValues.containsKey('sid6-expires')
+  }
+
+  def "startup refresh browses favorites and playlists without child devices"() {
+    given:
+    driver.runtimeState.catalogRefreshOwner = true
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+
+    when:
+    driver.refreshUpnpMediaCatalogs()
+
+    then:
+    driver.asyncCalls*.cb.containsAll(['favoritesBrowseCallback', 'playlistsBrowseCallback'])
+  }
+
+  def "finished catalog browses queue normalized snapshots for the parent app"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    List<Map> received = []
+    driver.device.metaClass.getIdAsLong = { -> 1L }
+    driver.metaClass.buildHubitatRunMethodOnclick = { Long id, String method, List args -> '' }
+    driver.metaClass.getParent = { -> new Expando(
+      putCatalogSnapshot: { String dni, String type, List<Map> records -> received << [dni: dni, type: type, records: records] }) }
+    String playlists = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
+      'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><container id="SQ:7"><dc:title>Morning &amp; Evening</dc:title>' +
+      '<upnp:albumArtURI>http://192.168.1.50:1400/art.jpg</upnp:albumArtURI><res>file:///jffs/settings/savedqueues.rsq#7</res></container></DIDL-Lite>'
+
+    when:
+    driver.getPlaylists()
+    Map request = driver.asyncCalls.last()
+    driver.playlistsBrowseCallback(new hubitat.scheduling.AsyncResponse(status: 200,
+      data: '<BrowseResponse><Result>' + StringEscapeUtils.escapeXml10(playlists) +
+        '</Result><TotalMatches>1</TotalMatches><NumberReturned>1</NumberReturned><UpdateID>5</UpdateID></BrowseResponse>'), request.data)
+
+    then:
+    received.isEmpty()
+    driver.scheduled.any { List row -> row[1] == 'relayCatalogSnapshotsToParent' }
+
+    when:
+    driver.relayCatalogSnapshotsToParent()
+
+    then:
+    received.size() == 1
+    received[0].type == 'playlists'
+    received[0].dni == driver.device.deviceNetworkId
+    received[0].records == [[id: '7', name: 'Morning & Evening', imageUrl: 'http://192.168.1.50:1400/art.jpg']]
   }
 
   void drainParentBridge() {

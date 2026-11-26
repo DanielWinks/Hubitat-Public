@@ -343,6 +343,9 @@ preferences {
 @Field static final String PLAYER_PROVISIONING_REQUEST_STATUS_KEY = 'playerProvisioningRequestStatus'
 @Field static final String PENDING_GROUP_CONFIGURATION_REQUESTS_KEY = 'pendingGroupConfigurationRequests'
 @Field static final String DISCOVERY_MANAGEMENT_CHILD_ID_STATE_KEY = 'discoveryManagementChildInstanceId'
+@Field static final String PLAYLISTS_CHILD_APP_NAME = 'Sonos Advanced Controller - Playlists'
+@Field static final String FAVORITES_CHILD_APP_NAME = 'Sonos Advanced Controller - Favorites'
+@Field static final String PENDING_CATALOG_SNAPSHOTS_STATE_KEY = 'pendingCatalogSnapshots'
 @Field static final String CHILD_MANAGED_SETTINGS_STATE_KEY = 'childManagedSettings'
 @Field static final List<String> CHILD_MANAGED_SETTING_NAMES = [
   'maximumTtsRetention', 'groupAnnouncementMode', 'highPriorityAnnouncementMode',
@@ -516,6 +519,7 @@ preferences {
   PLAYER_PROVISIONING_REQUEST_STATUS_KEY,
   PENDING_GROUP_CONFIGURATION_REQUESTS_KEY,
   DISCOVERY_MANAGEMENT_CHILD_ID_STATE_KEY,
+  PENDING_CATALOG_SNAPSHOTS_STATE_KEY,
   LOCAL_CONTROL_RETRY_STATE_KEY,
   LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY,
   STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY,
@@ -718,6 +722,22 @@ Map mainPage() {
         paragraph 'The Discovery & Management child app could not be created. Reopen this page to retry.'
       }
     }
+    section('Media Catalogs') {
+      InstalledAppWrapper favoritesChild = ensureCatalogChild(FAVORITES_CHILD_APP_NAME)
+      InstalledAppWrapper playlistsChild = ensureCatalogChild(PLAYLISTS_CHILD_APP_NAME)
+      if(favoritesChild) {
+        href(url: "/installedapp/configure/${favoritesChild.getId()}/mainPage", title: 'Sonos Favorites',
+            description: 'View favorites with artwork and IDs', style: 'internal')
+      } else {
+        paragraph 'The Favorites child app could not be created. Reopen this page to retry.'
+      }
+      if(playlistsChild) {
+        href(url: "/installedapp/configure/${playlistsChild.getId()}/mainPage", title: 'Sonos Playlists',
+            description: 'View playlists with artwork and IDs', style: 'internal')
+      } else {
+        paragraph 'The Playlists child app could not be created. Reopen this page to retry.'
+      }
+    }
     section('Logging') {
       input 'logLevel', 'enum', title: 'Logging level',
         options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'],
@@ -744,6 +764,71 @@ InstalledAppWrapper ensureDiscoveryManagementChild() {
   } catch(Exception e) {
     logError("Could not create the Discovery & Management child app: ${e.message}")
     return null
+  }
+}
+
+/** Ensure exactly one child app of the given name exists; returns it (or null if creation failed). */
+InstalledAppWrapper ensureCatalogChild(String childAppName) {
+  List<InstalledAppWrapper> childApps = getChildApps() as List<InstalledAppWrapper>
+  InstalledAppWrapper child = childApps?.find { InstalledAppWrapper candidate -> candidate.getName() == childAppName }
+  if(child) {
+    // Earlier versions labeled these 'Sonos Favorites'/'Sonos Playlists'; the label matches the app name now.
+    if(child.getLabel() != childAppName) { child.updateLabel(childAppName) }
+    return child
+  }
+  try {
+    InstalledAppWrapper created = app.addChildApp('dwinks', childAppName, childAppName)
+    if(created && state[PENDING_CATALOG_SNAPSHOTS_STATE_KEY] instanceof Map) { runIn(1, 'drainCatalogSnapshots', [overwrite: true]) }
+    return created
+  } catch(Exception e) {
+    logError("Could not create the ${childAppName} child app: ${e.message}")
+    return null
+  }
+}
+
+InstalledAppWrapper findCatalogChild(String catalogType) {
+  String childAppName = catalogType == 'favorites' ? FAVORITES_CHILD_APP_NAME : (catalogType == 'playlists' ? PLAYLISTS_CHILD_APP_NAME : null)
+  if(!childAppName) { return null }
+  List<InstalledAppWrapper> childApps = getChildApps() as List<InstalledAppWrapper>
+  return childApps?.find { InstalledAppWrapper candidate -> candidate.getName() == childAppName }
+}
+
+/**
+ * Player drivers hand over normalized catalog records ([id:, name:, imageUrl:]) from a scheduled callback.
+ * Only the latest snapshot per catalog is kept; delivery to the child app is deferred so this call returns quickly.
+ */
+void putCatalogSnapshot(String dni, String catalogType, List<Map> records) {
+  if(!(catalogType in ['favorites', 'playlists']) || !(records instanceof List)) { return }
+  Map pending = state[PENDING_CATALOG_SNAPSHOTS_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PENDING_CATALOG_SNAPSHOTS_STATE_KEY]) : [:]
+  pending[catalogType] = [dni: dni, records: new ArrayList<Map>(records)]
+  state[PENDING_CATALOG_SNAPSHOTS_STATE_KEY] = pending
+  runIn(1, 'drainCatalogSnapshots', [overwrite: true])
+}
+
+void drainCatalogSnapshots() {
+  Map pending = state[PENDING_CATALOG_SNAPSHOTS_STATE_KEY] instanceof Map ? new LinkedHashMap((Map)state[PENDING_CATALOG_SNAPSHOTS_STATE_KEY]) : [:]
+  Map undelivered = [:]
+  pending.each { Object catalogType, Object snapshot ->
+    InstalledAppWrapper child = ensureCatalogChild(
+        catalogType == 'favorites' ? FAVORITES_CHILD_APP_NAME : PLAYLISTS_CHILD_APP_NAME)
+    Boolean delivered = false
+    if(child != null) {
+      try {
+        child.storeCatalogSnapshot((List<Map>)((Map)snapshot).records, ((Map)snapshot).dni?.toString())
+        delivered = true
+      } catch(Exception e) {
+        logWarn("Could not deliver ${catalogType} snapshot to its child app: ${e.message}")
+      }
+    }
+    if(!delivered) { undelivered[catalogType] = snapshot }
+  }
+  // Keep snapshots the child could not accept so a later retry (or the child's creation) delivers them.
+  if(undelivered.isEmpty()) {
+    state.remove(PENDING_CATALOG_SNAPSHOTS_STATE_KEY)
+  } else {
+    state[PENDING_CATALOG_SNAPSHOTS_STATE_KEY] = undelivered
+    runIn(60, 'drainCatalogSnapshots', [overwrite: true])
   }
 }
 
@@ -1402,9 +1487,11 @@ void configure(Boolean startup = false) {
   runIn(30, 'refreshTTSVoiceCache')
   schedule('0 0 3 * * ?', 'refreshTTSVoiceCache')
 
-  // Schedule daily favorites/playlists refresh at 3:05 AM
+  // Catalog refresh is notification-driven now; clear the retired daily job left on existing hubs.
   unschedule('refreshFavoritesAndPlaylists')
-  schedule('0 5 3 * * ?', 'refreshFavoritesAndPlaylists')
+  ensureCatalogChild(FAVORITES_CHILD_APP_NAME)
+  ensureCatalogChild(PLAYLISTS_CHILD_APP_NAME)
+  if(state[PENDING_CATALOG_SNAPSHOTS_STATE_KEY] instanceof Map) { runIn(1, 'drainCatalogSnapshots', [overwrite: true]) }
   rearmPlayerStateUpdateDrainAfterRestart()
 }
 
@@ -1417,6 +1504,12 @@ void synchronizeDiscoveryChildLogLevel() {
   }
   if(discoveryChild && discoveryChild.getSetting('logLevel')?.toString() != selectedLevel) {
     discoveryChild.updateSetting('logLevel', [type: 'enum', value: selectedLevel])
+  }
+  [FAVORITES_CHILD_APP_NAME, PLAYLISTS_CHILD_APP_NAME].each { String catalogChildName ->
+    InstalledAppWrapper catalogChild = children?.find { InstalledAppWrapper candidate -> candidate.getName() == catalogChildName }
+    if(catalogChild && catalogChild.getSetting('logLevel')?.toString() != selectedLevel) {
+      catalogChild.updateSetting('logLevel', [type: 'enum', value: selectedLevel])
+    }
   }
 }
 
@@ -2183,21 +2276,6 @@ void refreshTTSVoiceCacheCallback(AsyncResponse response, Map data) {
     catch (Exception e) { logDebug("Failed to update TTS cache for ${cd.label}: ${e.message}") }
   }
   logInfo("TTS voice cache refreshed: ${voiceNames.size()} voices, default: ${defaultVoice}")
-}
-void refreshFavoritesAndPlaylists() {
-  logDebug('Refreshing favorites and playlists...')
-  try {
-    ChildDeviceWrapper player = getCurrentPlayerDevices().find { it.getDataValue('deviceIp') }
-    if(player) {
-      player.getFavorites()
-      player.getPlaylists()
-      logInfo("Favorites/playlists refresh triggered via ${player.label}")
-    } else {
-      logWarn('No player device available for favorites/playlists refresh')
-    }
-  } catch (Exception e) {
-    logError("Error refreshing favorites/playlists: ${e.message}")
-  }
 }
 
 // =============================================================================

@@ -1023,6 +1023,14 @@ metadata {
 @Field static ConcurrentHashMap<String, Long> lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static final String ZGT_SUB_DEVICE_KEY = 'zgtSub'
 @Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
+@Field static final String CONTENT_DIRECTORY_SUBSCRIPTION_KEY = 'contentDirectory'
+@Field static final String CONTENT_DIRECTORY_SUBSCRIPTION_ID_DEVICE_KEY = 'contentDirectorySubscriptionId'
+@Field static final String CONTENT_DIRECTORY_SUBSCRIPTION_EXPIRES_DEVICE_KEY = 'contentDirectorySubscriptionExpires'
+// Legacy names used before the ContentDirectory subscription got descriptive keys. Read only for migration.
+@Field static final String LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY = 'sid6'
+@Field static final String LEGACY_CONTENT_DIRECTORY_EXPIRES_DEVICE_KEY = 'sid6-expires'
+@Field static final String PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY = 'pendingCatalogSnapshots'
+@Field static final String CATALOG_REFRESH_OWNER_RUNTIME_KEY = 'catalogRefreshOwner'
 @Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
 @Field static volatile List<String> cachedTTSVoiceNames = null
@@ -1069,12 +1077,14 @@ metadata {
   'sid4',
   'sid5',
   'sid6',
+  'contentDirectorySubscriptionId',
   'alarmClock',
   'sid1-expires',
   'sid2-expires',
   'sid4-expires',
   'sid5-expires',
   'sid6-expires',
+  'contentDirectorySubscriptionExpires',
   'alarmClock-expires',
   'lastMrRcEvent',
   'lastMrGrcEvent',
@@ -1359,6 +1369,8 @@ void performImmediateInitialization(Boolean subscribeToZgt = true) {
   // stays subscribed so a follower can report immediately if it becomes coordinator.
   subscribeToMrGrcEvents()
   if(hasHTPlaybackCapability()) { subscribeToHtControlEvents() }
+  // The ZGT election winner is the household's single catalog-refresh player.
+  runtimeState[CATALOG_REFRESH_OWNER_RUNTIME_KEY] = subscribeToZgt == true
   if(subscribeToZgt) {
     subscribeToZgtEvents()
     // The ZGT election winner also owns the single AlarmClock subscription; no second election.
@@ -1385,7 +1397,8 @@ void clearPlayerSubscriptionsForInitialization() {
   String sid = getSid('zgt')
   Boolean hadValid = subValid('zgt') || sid
   Boolean hadGroupRenderingSubscription = subValid('sid4') || getSid('sid4') != null
-  Boolean hadContentDirectorySubscription = subValid('sid6') || getSid('sid6') != null
+  migrateLegacyContentDirectorySubscription()
+  Boolean hadContentDirectorySubscription = subValid(CONTENT_DIRECTORY_SUBSCRIPTION_KEY) || getSid(CONTENT_DIRECTORY_SUBSCRIPTION_KEY) != null
   Boolean hadAlarmClockSubscription = subValid('alarmClock') || getSid('alarmClock') != null
   invalidateUpnpRequestsForDevice()
   if(hadAlarmClockSubscription) {
@@ -1394,7 +1407,7 @@ void clearPlayerSubscriptionsForInitialization() {
   }
   if(hadContentDirectorySubscription) {
     enqueueUpnpRequest('unsubscribe', 'unsubscribeFromContentDirectory', 'resubscribeToContentDirectory',
-        'sid6', null, CONTENT_DIRECTORY_UNSUB_CALLBACK, CONTENT_DIRECTORY_EVENTS)
+        CONTENT_DIRECTORY_SUBSCRIPTION_KEY, null, CONTENT_DIRECTORY_UNSUB_CALLBACK, CONTENT_DIRECTORY_EVENTS)
   }
   if(hadGroupRenderingSubscription) {
     enqueueUpnpRequest('unsubscribe', 'unsubscribeFromMrGrcEvents', 'resubscribeToMrGrcEvents',
@@ -1406,13 +1419,14 @@ void clearPlayerSubscriptionsForInitialization() {
   deleteSid('sid2')
   deleteSid('sid4')
   deleteSid('sid5')
-  deleteSid('sid6')
+  deleteSid(CONTENT_DIRECTORY_SUBSCRIPTION_KEY)
   deleteSid('alarmClock')
   device.removeDataValue('sid1-expires')
   device.removeDataValue('sid2-expires')
   device.removeDataValue('sid4-expires')
   device.removeDataValue('sid5-expires')
-  device.removeDataValue('sid6-expires')
+  device.removeDataValue(LEGACY_CONTENT_DIRECTORY_EXPIRES_DEVICE_KEY)
+  device.removeDataValue(LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY)
   device.removeDataValue('alarmClock-expires')
   if(hadValid) {
     enqueueUpnpRequest('unsubscribe', 'unsubscribeFromZgtEvents', 'resubscribeToZgtEvents', 'zgt', null, ZGT_EVENTS_UNSUB_CALLBACK, ZGT_EVENTS)
@@ -4716,10 +4730,10 @@ String normalizeFavoriteUri(String uri) {
 }
 
 void ensureFavoritesAndPlaylistsLoaded() {
-  if(getFavoritesChild() != null && getFavoritesMap().isEmpty() && !getDriverStateValue('favoritesBrowseRequestId')) {
+  if(getFavoritesMap().isEmpty() && !getDriverStateValue('favoritesBrowseRequestId')) {
     getFavorites()
   }
-  if(getPlaylistChild() != null && getPlaylistsMap().isEmpty() && !getDriverStateValue('playlistsBrowseRequestId')) {
+  if(getPlaylistsMap().isEmpty() && !getDriverStateValue('playlistsBrowseRequestId')) {
     getPlaylists()
   }
 }
@@ -5215,16 +5229,37 @@ Boolean hasSid(String sid) {
 DeviceWrapper getThisDevice() {
   return this.device as DeviceWrapper
 }
+@CompileStatic
+String subscriptionIdDataKey(String subscriptionKey) {
+  if(subscriptionKey == 'zgt') { return ZGT_SUB_DEVICE_KEY }
+  if(subscriptionKey == CONTENT_DIRECTORY_SUBSCRIPTION_KEY) { return CONTENT_DIRECTORY_SUBSCRIPTION_ID_DEVICE_KEY }
+  return subscriptionKey
+}
+@CompileStatic
+String subscriptionExpiryDataKey(String subscriptionKey) {
+  if(subscriptionKey == 'zgt') { return ZGT_SUB_EXPIRES_DEVICE_KEY }
+  if(subscriptionKey == CONTENT_DIRECTORY_SUBSCRIPTION_KEY) { return CONTENT_DIRECTORY_SUBSCRIPTION_EXPIRES_DEVICE_KEY }
+  return "${subscriptionKey}-expires".toString()
+}
+/** Move a pre-rename ContentDirectory SID onto the descriptive key so the normal unsubscribe path can release it. */
+void migrateLegacyContentDirectorySubscription() {
+  String legacySid = device.getDataValue(LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY)
+  if(legacySid && !device.getDataValue(CONTENT_DIRECTORY_SUBSCRIPTION_ID_DEVICE_KEY)) {
+    setDeviceDataValue(CONTENT_DIRECTORY_SUBSCRIPTION_ID_DEVICE_KEY, legacySid)
+  }
+  device.removeDataValue(LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY)
+  device.removeDataValue(LEGACY_CONTENT_DIRECTORY_EXPIRES_DEVICE_KEY)
+}
 String getSid(String sid) {
-  return device.getDataValue(sid == 'zgt' ? ZGT_SUB_DEVICE_KEY : sid)
+  return device.getDataValue(subscriptionIdDataKey(sid))
 }
 void setSid(String sid, String value) {
-  setDeviceDataValue(sid == 'zgt' ? ZGT_SUB_DEVICE_KEY : sid, value)
+  setDeviceDataValue(subscriptionIdDataKey(sid), value)
 }
 void deleteSid(String sid) {
   logDebug("Removing SID for ${sid}")
-  String sidDataKey = sid == 'zgt' ? ZGT_SUB_DEVICE_KEY : sid
-  String expiryDataKey = sid == 'zgt' ? ZGT_SUB_EXPIRES_DEVICE_KEY : "${sid}-expires"
+  String sidDataKey = subscriptionIdDataKey(sid)
+  String expiryDataKey = subscriptionExpiryDataKey(sid)
   device.removeDataValue(sidDataKey)
   device.removeDataValue(expiryDataKey)
   // Clean up in-memory expiry
@@ -5253,7 +5288,7 @@ void updateSid(String sid, Map headers, Long grantedTimeout = null) {
   eventTimestamps.put(expiryKey, expiresEpoch)
   // Write human-readable expiry to device data for visibility
   String formatted = formatEpoch(expiresEpoch)
-  String expiryDataKey = sid == 'zgt' ? ZGT_SUB_EXPIRES_DEVICE_KEY : "${sid}-expires"
+  String expiryDataKey = subscriptionExpiryDataKey(sid)
   setDeviceDataValue(expiryDataKey, formatted)
   if(headers["SID"]) {setSid(sid, headers["SID"].toString())}
   if(headers["sid"]) {setSid(sid, headers["sid"].toString())}
@@ -5324,7 +5359,7 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
 
 void enqueueUpnpRequest(String operation, String method, String resub, String sidKey, String eventPath, String callbackPath, String eventUrl) {
   Map entry = getUpnpRequestQueue()
-  if(entry == null || !['sid1','sid2','zgt','sid4','sid5','sid6','alarmClock'].contains(sidKey)) { return }
+  if(entry == null || !['sid1','sid2','zgt','sid4','sid5',CONTENT_DIRECTORY_SUBSCRIPTION_KEY,'alarmClock'].contains(sidKey)) { return }
   String subscribeMethod = defaultSubscribeMethod(sidKey)
   String resubscribeMethod = resub ?: defaultResubscribeMethod(sidKey)
   Map request = [guid: UUID.randomUUID().toString(), operation: operation, sidKey: sidKey,
@@ -5360,7 +5395,7 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
         case 'zgt': unschedule('retryUpnpZgt'); break
         case 'sid4': unschedule('retryUpnpSid4'); break
         case 'sid5': unschedule('retryUpnpSid5'); break
-        case 'sid6': unschedule('retryUpnpSid6'); break
+        case CONTENT_DIRECTORY_SUBSCRIPTION_KEY: unschedule('retryContentDirectorySubscription'); break
         case 'alarmClock': unschedule('retryUpnpAlarmClock'); break
       }
     }
@@ -5374,10 +5409,10 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
 }
 
 String defaultSubscribeMethod(String sidKey) {
-  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', zgt: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents', sid5: 'subscribeToHtControlEvents', sid6: 'subscribeToContentDirectory', alarmClock: 'subscribeToAlarmClockEvents'][sidKey]
+  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', zgt: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents', sid5: 'subscribeToHtControlEvents', contentDirectory: 'subscribeToContentDirectory', alarmClock: 'subscribeToAlarmClockEvents'][sidKey]
 }
 String defaultResubscribeMethod(String sidKey) {
-  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', zgt: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents', sid5: 'resubscribeToHtControlEvents', sid6: 'resubscribeToContentDirectory', alarmClock: 'resubscribeToAlarmClockEvents'][sidKey]
+  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', zgt: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents', sid5: 'resubscribeToHtControlEvents', contentDirectory: 'resubscribeToContentDirectory', alarmClock: 'resubscribeToAlarmClockEvents'][sidKey]
 }
 
 void dispatchNextUpnpRequest(Map entry) {
@@ -5686,7 +5721,7 @@ void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverr
     case 'zgt': runIn(delay, 'retryUpnpZgt', options); break
     case 'sid4': runIn(delay, 'retryUpnpSid4', options); break
     case 'sid5': runIn(delay, 'retryUpnpSid5', options); break
-    case 'sid6': runIn(delay, 'retryUpnpSid6', options); break
+    case CONTENT_DIRECTORY_SUBSCRIPTION_KEY: runIn(delay, 'retryContentDirectorySubscription', options); break
     case 'alarmClock': runIn(delay, 'retryUpnpAlarmClock', options); break
   }
 }
@@ -5695,7 +5730,7 @@ void retryUpnpSid2(Map data) { retryUpnpRequest(data) }
 void retryUpnpZgt(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid4(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid5(Map data) { retryUpnpRequest(data) }
-void retryUpnpSid6(Map data) { retryUpnpRequest(data) }
+void retryContentDirectorySubscription(Map data) { retryUpnpRequest(data) }
 void retryUpnpAlarmClock(Map data) { retryUpnpRequest(data) }
 
 void retryUpnpRequest(Map data) {
@@ -5775,7 +5810,7 @@ void invalidateUpnpRequestsForDevice() {
     unschedule('retryUpnpZgt')
     unschedule('retryUpnpSid4')
     unschedule('retryUpnpSid5')
-    unschedule('retryUpnpSid6')
+    unschedule('retryContentDirectorySubscription')
     unschedule('retryUpnpAlarmClock')
     active = entry.active as Map
     if(active != null) {
@@ -5808,7 +5843,7 @@ void retireUpnpRequestsForDevice() {
     unschedule('retryUpnpZgt')
     unschedule('retryUpnpSid4')
     unschedule('retryUpnpSid5')
-    unschedule('retryUpnpSid6')
+    unschedule('retryContentDirectorySubscription')
     unschedule('retryUpnpAlarmClock')
     active = entry.active as Map
     if(active != null) { active.phase = 'expired'; socket = detachOwnedUpnpSocketLocked(entry, active) }
@@ -6094,37 +6129,35 @@ void unsubscribeFromHtControlEventsCallback(HubResponse response) {
   upnpUnsubscribeCallbackGeneric('sid5', 'MediaRenderer/HTControl', response)
 }
 // /////////////////////////////////////////////////////////////////////////////
-// '/MediaServer/ContentDirectory/Event' //sid6
+// '/MediaServer/ContentDirectory/Event' //contentDirectory
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToContentDirectory() {
-  if(!hasFavoriteOrPlaylistChild()) { return }
-  upnpSubscribeGeneric('subscribeToContentDirectory', 'sid6', '/contentdirectory',
+  upnpSubscribeGeneric('subscribeToContentDirectory', CONTENT_DIRECTORY_SUBSCRIPTION_KEY, '/contentdirectory',
       CONTENT_DIRECTORY_CALLBACK, CONTENT_DIRECTORY_EVENTS)
 }
 
 @CompileStatic
 void resubscribeToContentDirectory() {
-  if(!hasFavoriteOrPlaylistChild()) { return }
-  upnpResubscribeGeneric('resubscribeToContentDirectory', 'sid6', '/contentdirectory',
+  upnpResubscribeGeneric('resubscribeToContentDirectory', CONTENT_DIRECTORY_SUBSCRIPTION_KEY, '/contentdirectory',
       CONTENT_DIRECTORY_CALLBACK, CONTENT_DIRECTORY_EVENTS)
 }
 
 @CompileStatic
 void unsubscribeFromContentDirectory() {
-  upnpUnsubscribeGeneric('unsubscribeFromContentDirectory', 'sid6', 'resubscribeToContentDirectory',
+  upnpUnsubscribeGeneric('unsubscribeFromContentDirectory', CONTENT_DIRECTORY_SUBSCRIPTION_KEY, 'resubscribeToContentDirectory',
       CONTENT_DIRECTORY_EVENTS, CONTENT_DIRECTORY_UNSUB_CALLBACK)
 }
 
 @CompileStatic
 void subscribeResubscribeToContentDirectoryCallback(HubResponse response) {
   subscribeResubscribeGenericCallback('subscribeToContentDirectory', 'resubscribeToContentDirectory',
-      'sid6', 'MediaServer/ContentDirectory', response)
+      CONTENT_DIRECTORY_SUBSCRIPTION_KEY, 'MediaServer/ContentDirectory', response)
 }
 
 @CompileStatic
 void unsubscribeContentDirectoryCallback(HubResponse response) {
-  upnpUnsubscribeCallbackGeneric('sid6', 'MediaServer/ContentDirectory', response)
+  upnpUnsubscribeCallbackGeneric(CONTENT_DIRECTORY_SUBSCRIPTION_KEY, 'MediaServer/ContentDirectory', response)
 }
 // =============================================================================
 // End UPnP Subscriptions and Resubscriptions
@@ -7158,12 +7191,14 @@ void renewWebsocketConnection() {
 // Websocket Subscriptions and polling
 // =============================================================================
 
-void refreshUpnpMediaCatalogs() {
-  if(getFavoritesChild() != null) { getFavorites() }
-  if(getPlaylistChild() != null) { getPlaylists() }
-}
+/** Only the elected (ZGT) player browses on startup or on a household catalog notification. */
+Boolean isCatalogRefreshOwner() { return runtimeState[CATALOG_REFRESH_OWNER_RUNTIME_KEY] == true }
 
-Boolean hasFavoriteOrPlaylistChild() { return getFavoritesChild() != null || getPlaylistChild() != null }
+void refreshUpnpMediaCatalogs() {
+  if(!isCatalogRefreshOwner()) { return }
+  getFavorites()
+  getPlaylists()
+}
 
 void handleContentDirectoryPayload(String xmlBody) {
   GPathResult root = new XmlSlurper().parseText(xmlBody)
@@ -7178,8 +7213,23 @@ void handleContentDirectoryPayload(String xmlBody) {
       if(name && valueText != null) { events << [name: name, value: valueText] }
     }
   }
-  if(events.any { Map event -> event.name == 'FavoritesUpdateID' } && getFavoritesChild() != null) { getFavorites() }
-  if(events.any { Map event -> event.name == 'SavedQueuesUpdateID' } && getPlaylistChild() != null) { getPlaylists() }
+  Boolean favoritesChanged = events.any { Map event -> event.name == 'FavoritesUpdateID' }
+  Boolean playlistsChanged = events.any { Map event -> event.name == 'SavedQueuesUpdateID' }
+  if(!isCatalogRefreshOwner()) {
+    // Non-elected players do not browse on every notification. Drop the stale local catalog so the lazy
+    // load refills it; a player with its own Favorites/Playlist child refreshes that device right away.
+    if(favoritesChanged) {
+      clearFavoritesMap()
+      if(getCreateFavoritesChildDevice() && getFavoritesChild() != null) { getFavorites() }
+    }
+    if(playlistsChanged) {
+      clearPlaylistsMap()
+      if(getCreatePlaylistChildDevice() && getPlaylistChild() != null) { getPlaylists() }
+    }
+    return
+  }
+  if(favoritesChanged) { getFavorites() }
+  if(playlistsChanged) { getPlaylists() }
 }
 
 void subscribeToAudioClip() {
@@ -7670,6 +7720,7 @@ void cacheUpnpFavorites(List<Map> favorites) {
   }
   html += '</div></body></html>'
   setChildFavs(html)
+  enqueueCatalogSnapshot('favorites', favorites)
   rematchLatestUpnpPlaybackSnapshot()
 }
 
@@ -7750,6 +7801,7 @@ void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
     }
     html += '</div></body></html>'
     setChildPlaylists(html)
+    enqueueCatalogSnapshot('playlists', accumulated)
     removeDriverStateValue('playlistsBrowseRequestId')
     removeDriverStateValue('playlistsBrowseItems')
     logInfo("Loaded ${accumulated.size()} Sonos Playlists through UPnP (total=${total}, updateId=${findSoapBodyField(envelope, 'UpdateID') ?: 'unknown'})")
@@ -7763,6 +7815,49 @@ void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
 }
 
 /** Re-run favorite/playlist matching for the last coordinator AVT after the favorites or playlists were reloaded. */
+/** Latest-wins catalog snapshot handoff; the parent call runs in a scheduled callback, never inline. */
+void enqueueCatalogSnapshot(String catalogType, List<Map> records) {
+  if(parent == null || !catalogType) { return }
+  List<Map> normalized = []
+  records?.each { Map record ->
+    String id = record?.id?.toString()
+    if(!id) { return }
+    normalized.add([id: id, name: record?.name?.toString(), imageUrl: record?.imageUrl?.toString()])
+  }
+  ConcurrentHashMap<String, Object> runtime = getRuntimeState()
+  synchronized(runtime) {
+    Map pending = runtime[PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY] instanceof Map
+        ? (Map)runtime[PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY] : new LinkedHashMap<String, List<Map>>()
+    pending.put(catalogType, normalized)
+    runtime.put(PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY, pending)
+  }
+  runInMillis(1, 'relayCatalogSnapshotsToParent', [overwrite: true])
+}
+
+void relayCatalogSnapshotsToParent() {
+  Map pending = null
+  ConcurrentHashMap<String, Object> runtime = getRuntimeState()
+  synchronized(runtime) {
+    pending = runtime.remove(PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY) as Map
+  }
+  if(pending == null || pending.isEmpty() || parent == null) { return }
+  pending.each { Object catalogType, Object records ->
+    try {
+      parent.putCatalogSnapshot(device.getDeviceNetworkId(), catalogType.toString(), new ArrayList<Map>((List<Map>)records))
+    } catch(Exception e) {
+      logWarn("Could not relay ${catalogType} catalog snapshot to parent; will retry: ${e.message}")
+      // Requeue unless a newer snapshot for this catalog arrived meanwhile.
+      synchronized(runtime) {
+        Map requeued = runtime[PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY] instanceof Map
+            ? (Map)runtime[PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY] : new LinkedHashMap<String, List<Map>>()
+        if(!requeued.containsKey(catalogType)) { requeued.put(catalogType, records) }
+        runtime.put(PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY, requeued)
+      }
+      runInMillis(30000, 'relayCatalogSnapshotsToParent', [overwrite: true])
+    }
+  }
+}
+
 void rematchLatestUpnpPlaybackSnapshot() {
   if(runtimeState.avtMatchKeys instanceof Map) { scheduleAvtRelay([], [:], true) }
 }

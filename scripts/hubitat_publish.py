@@ -59,6 +59,8 @@ SAC_FILES = [
     ("Drivers/Component/SonosAdvSleepTimer.groovy", "driver"),
     ("Drivers/Component/SonosAdvSnapshot.groovy", "driver"),
     ("Apps/SonosAdvancedDiscoveryApp.groovy", "app"),
+    ("Apps/SonosAdvancedFavoritesApp.groovy", "app"),
+    ("Apps/SonosAdvancedPlaylistsApp.groovy", "app"),
     ("Apps/SonosAdvancedApp.groovy", "app"),
 ]
 
