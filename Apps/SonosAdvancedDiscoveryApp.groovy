@@ -983,6 +983,7 @@ void logError(String message) { if(getConfiguredLogLevel() in ['trace', 'debug',
 void logWarn(String message) { if(getConfiguredLogLevel() in ['trace', 'debug', 'info', 'warn']) { log.warn("${app.label ?: app.name}: ${message}") } }
 void logInfo(String message) { if(getConfiguredLogLevel() in ['trace', 'debug', 'info']) { log.info("${app.label ?: app.name}: ${message}") } }
 void logDebug(String message) { if(getConfiguredLogLevel() in ['trace', 'debug']) { log.debug("${app.label ?: app.name}: ${message}") } }
+void logTrace(String message) { if(getConfiguredLogLevel() == 'trace') { log.trace("${app.label ?: app.name}: ${message}") } }
 String getConfiguredLogLevel() {
   String level = settings.logLevel?.toString()?.toLowerCase(Locale.ROOT)
   return level in ['trace', 'debug', 'info', 'warn', 'error', 'off'] ? level : 'info'
@@ -2195,7 +2196,7 @@ Boolean reserveDiscoveryProbe(String endpoint) {
 void considerDiscoveryCandidate(String ipAddress, Integer upnpPort) {
   String host = ipAddress?.trim()
   if(!host) { return }
-  logDebug("Considering discovery candidate at ${host}:${upnpPort}")
+  logTrace("Considering discovery candidate at ${host}:${upnpPort}")
   if(atomicState[DISCOVERY_RUNNING_KEY] != true) {
     logDebug("Skipping discovery candidate ${host}:${upnpPort}; discovery session is stopped")
     return
@@ -2215,7 +2216,7 @@ void considerDiscoveryCandidate(String ipAddress, Integer upnpPort) {
       if(!pending.contains(host)) { pending << host }
       state[PENDING_DISCOVERY_CANDIDATES_STATE_KEY] = pending
     }
-    logDebug("Queued discovery candidate ${host}; a topology request is already in flight")
+    logTrace("Queued discovery candidate ${host}; a topology request is already in flight")
     return
   }
   if(!reserveDiscoveryProbe("${host}:${upnpPort}".toString())) { return }

@@ -349,7 +349,7 @@ String getConfiguredLogLevel() {
   if(settings.logEnable == false) { return 'off' }
   if(settings.traceLogEnable == true) { return 'trace' }
   if(settings.debugLogEnable == true) { return 'debug' }
-  return 'trace' // TEMPORARY: diagnosing UPnP subscription refusals at player creation; restore to 'info'
+  return 'info'
 }
 
 String normalizeLogLevel(String level) {
@@ -921,7 +921,7 @@ metadata {
       input 'enableRawWebsocketLogging', 'bool', title: 'Enable raw WebSocket message logging (verbose, requires trace logging enabled)', required: false, defaultValue: false
     }
     section('Logging Settings') {
-      input name: 'logLevel', type: 'enum', title: 'Logging level', options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'], defaultValue: 'trace', submitOnChange: true
+      input name: 'logLevel', type: 'enum', title: 'Logging level', options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'], defaultValue: 'info', submitOnChange: true
     }
   }
 }
