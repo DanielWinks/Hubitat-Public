@@ -18,8 +18,10 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 
   List<String> reads = []
   List<String> zgtElectionResults = []
+  Integer zgtReelectionRequests = 0
 
   void zgtElectionResult(String result) { zgtElectionResults << result }
+  void reevaluateZgtElection() { zgtReelectionRequests++ }
 
   Object getSetting(String name) { reads << "getSetting:${name}".toString(); return settings[name] }
   Object currentValue(String n, boolean skipCache = false) { reads << "currentValue:${n}".toString(); return currentValues[n] }
@@ -264,10 +266,95 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "first player reporting ready wins ZGT subscription and winner can retry"() {
     expect:
-    appScript.readyForZgt('DNI-FIRST') == 'proceed'
-    appScript.readyForZgt('DNI-SECOND') == 'wait'
-    appScript.readyForZgt('DNI-FIRST') == 'proceed'
-    appScript.atomicState.readyForZgt == ['DNI-FIRST', 'DNI-SECOND']
+    appScript.readyForZgt(coordinator.deviceNetworkId) == 'proceed'
+    appScript.readyForZgt(follower.deviceNetworkId) == 'wait'
+    appScript.readyForZgt(coordinator.deviceNetworkId) == 'proceed'
+    appScript.atomicState.readyForZgt.dni == coordinator.deviceNetworkId
+    appScript.atomicState.readyForZgt.electedAt instanceof Long
+  }
+
+  def "ZGT subscriber is re-elected after the winner is deleted"() {
+    given:
+    appScript.readyForZgt(coordinator.deviceNetworkId)
+
+    when:
+    appScript.children.remove(coordinator)
+    appScript.app.children = appScript.children
+    Boolean evicted = appScript.evictZgtSubscriber(coordinator.deviceNetworkId, 'player deleted')
+    runScheduledCallbacks(['requestZgtReelection'])
+
+    then:
+    evicted
+    appScript.atomicState.readyForZgt == null
+    follower.zgtReelectionRequests == 1
+    appScript.readyForZgt(follower.deviceNetworkId) == 'proceed'
+  }
+
+  def "ZGT subscriber is evicted when the winner reports offline"() {
+    given:
+    appScript.readyForZgt(coordinator.deviceNetworkId)
+
+    when:
+    appScript.playerAppRequestHandler([channel: 'playerAppRequest', action: 'reportPlayerOffline',
+      sourceDni: coordinator.deviceNetworkId, requestId: 'off-1', args: [:]])
+    runScheduledCallbacks(['requestZgtReelection'])
+
+    then:
+    appScript.atomicState.readyForZgt == null
+    coordinator.zgtReelectionRequests == 0
+    follower.zgtReelectionRequests == 1
+    appScript.readyForZgt(follower.deviceNetworkId) == 'proceed'
+    appScript.readyForZgt(coordinator.deviceNetworkId) == 'wait'
+  }
+
+  def "ZGT winner that never sends a payload is replaced after the election window"() {
+    given:
+    appScript.readyForZgt(coordinator.deviceNetworkId)
+    appScript.atomicState.readyForZgt = appScript.atomicState.readyForZgt + [electedAt: appScript.now() - 400000L]
+
+    when:
+    appScript.checkZgtElectionPayload()
+    runScheduledCallbacks(['requestZgtReelection'])
+
+    then:
+    appScript.atomicState.readyForZgt == null
+    follower.zgtReelectionRequests == 1
+    appScript.readyForZgt(follower.deviceNetworkId) == 'proceed'
+  }
+
+  def "ZGT winner that delivered a payload is not evicted by the election window"() {
+    given:
+    appScript.readyForZgt(coordinator.deviceNetworkId)
+    appScript.recordZgtPayloadDelivery(coordinator.deviceNetworkId)
+    appScript.atomicState.readyForZgt = appScript.atomicState.readyForZgt + [electedAt: appScript.now() - 400000L]
+
+    when:
+    appScript.checkZgtElectionPayload()
+
+    then:
+    appScript.readyForZgt(follower.deviceNetworkId) == 'wait'
+    appScript.readyForZgt(coordinator.deviceNetworkId) == 'proceed'
+  }
+
+  def "ZGT winner whose IP changed is replaced by the next requester"() {
+    given:
+    coordinator.dataValues.deviceIp = '192.168.1.10'
+    appScript.readyForZgt(coordinator.deviceNetworkId)
+
+    when:
+    coordinator.dataValues.deviceIp = '192.168.1.99'
+
+    then:
+    appScript.readyForZgt(follower.deviceNetworkId) == 'proceed'
+  }
+
+  def "legacy list-shaped election keeps its first entry as winner"() {
+    given:
+    appScript.atomicState.readyForZgt = [coordinator.deviceNetworkId, follower.deviceNetworkId]
+
+    expect:
+    appScript.readyForZgt(follower.deviceNetworkId) == 'wait'
+    appScript.readyForZgt(coordinator.deviceNetworkId) == 'proceed'
   }
 
   def "player and group preference snapshots are stored by child DNI and used by app operations"() {
@@ -654,15 +741,20 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.getPlayerReadings()['RINCON_COORD'] == null
   }
 
-  def "readyForZgt keeps the first reporter under concurrent election requests"() {
+  def "readyForZgt elects exactly one winner under concurrent election requests"() {
+    given:
+    List<String> dnis = [coordinator, follower, extra]*.deviceNetworkId
+
     when:
+    List<String> results = Collections.synchronizedList([])
     List<Thread> threads = (1..8).collect { Integer index ->
-      Thread.start { appScript.readyForZgt("DNI-${index}".toString()) }
+      Thread.start { results << appScript.readyForZgt(dnis[index % 3]) }
     }
     threads*.join()
 
-    then: 'every reporter is recorded exactly once'
-    (appScript.atomicState.readyForZgt as List).sort() == (1..8).collect { "DNI-${it}".toString() }.sort()
+    then:
+    appScript.atomicState.readyForZgt.dni in dnis
+    results.count { it == 'proceed' } >= 1
   }
 
   def "app lock helpers do not lose updates across threads"() {

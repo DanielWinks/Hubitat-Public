@@ -370,6 +370,8 @@ preferences {
 @Field static final String PLAYER_PREFERENCES_BY_DNI_STATE_KEY = 'playerPreferencesByDni'
 @Field static final String GROUP_PREFERENCES_BY_DNI_STATE_KEY = 'groupPreferencesByDni'
 @Field static final String READY_FOR_ZGT_STATE_KEY = 'readyForZgt'
+// A newly elected subscriber must deliver its first setZgtPayload within this window or it is evicted.
+@Field static final Long ZGT_ELECTION_PAYLOAD_TIMEOUT_MS = 300000L
 @Field static final String LAST_PROCESSED_TOPOLOGY_STATE_KEY = 'lastProcessedTopologyByDni'
 @Field static final String ALARM_REQUEST_ATTRIBUTE = 'sonosAlarmRequest'
 @Field static final List<String> SHARED_PLAYER_PLAYBACK_ATTRIBUTES = [
@@ -1478,7 +1480,10 @@ void drainPlayerProvisioningRequests() {
       ((Collection)request.remove).each { Object rawDni ->
         String dni = rawDni?.toString()
         ChildDeviceWrapper player = dni ? app.getChildDevice(dni) : null
-        if(player && player.getDataValue('id')) { app.deleteChildDevice(dni) }
+        if(player && player.getDataValue('id')) {
+          app.deleteChildDevice(dni)
+          evictZgtSubscriber(dni, 'player deleted')
+        }
       }
       refreshGroupDeviceCoordinators()
       runIn(1, 'subscribeToGroupCommandRequests')
@@ -3086,17 +3091,94 @@ Boolean playerAppRequest(Map request) {
   return playerAppRequestHandler(request)
 }
 
-/** Elect the first non-battery player that reports ready as the household ZGT subscriber. */
+/**
+ * Elect the household ZGT subscriber. The election is stored as [dni, electedAt, deviceIp, lastPayloadAt]. A winner
+ * that is gone, offline (evicted by reportZgtSubscriberOffline), changed IP, or never delivered a payload inside
+ * ZGT_ELECTION_PAYLOAD_TIMEOUT_MS is evicted and the caller is elected in its place.
+ */
 String readyForZgt(String dni) {
   if(!dni) { return 'wait' }
+  Long nowMs = now()
+  Boolean elected = false
   Object ready = mutateAppData(READY_FOR_ZGT_STATE_KEY) { Object current ->
-    List<String> readyPlayers = current instanceof List ? new ArrayList<String>((List<String>)current) : []
-    if(!readyPlayers.contains(dni)) { readyPlayers.add(dni) }
-    return readyPlayers
+    Map election = normalizeZgtElection(current, nowMs)
+    if(election != null && !zgtSubscriberAlive(election, nowMs)) {
+      logInfo("Evicting ZGT subscriber ${election.dni}: no longer live; electing ${dni}")
+      election = null
+    }
+    if(election == null) {
+      elected = true
+      election = [dni: dni, electedAt: nowMs, deviceIp: zgtPlayerIp(dni), lastPayloadAt: null]
+    }
+    return election
   }
-  // Keep the original winner stable across repeated initialize calls; only it
-  // may retry its subscription after a restart or a failed UPnP request.
-  return ((List)ready)[0] == dni ? 'proceed' : 'wait'
+  if(elected) {
+    runInMillis(ZGT_ELECTION_PAYLOAD_TIMEOUT_MS + 1000L, 'checkZgtElectionPayload', [overwrite: true])
+  }
+  // Keep the winner stable across repeated initialize calls; only it may retry its subscription.
+  return ((Map)ready).dni == dni ? 'proceed' : 'wait'
+}
+
+/** Read a stored election, accepting the legacy list shape (first entry was the winner). */
+Map normalizeZgtElection(Object stored, Long nowMs) {
+  if(stored instanceof Map && ((Map)stored).dni) { return new LinkedHashMap((Map)stored) }
+  if(stored instanceof List && !((List)stored).isEmpty() && ((List)stored)[0]) {
+    String dni = ((List)stored)[0].toString()
+    return [dni: dni, electedAt: nowMs, deviceIp: zgtPlayerIp(dni), lastPayloadAt: null]
+  }
+  return null
+}
+
+String zgtPlayerIp(String dni) {
+  return getChildDevice(dni)?.getDataValue('deviceIp')?.toString()?.trim()
+}
+
+/** True while the elected player still exists, keeps its IP, and has delivered (or still may deliver) a payload. */
+Boolean zgtSubscriberAlive(Map election, Long nowMs) {
+  String dni = election.dni?.toString()
+  ChildDeviceWrapper player = dni ? getChildDevice(dni) : null
+  if(player == null) { return false }
+  String recordedIp = election.deviceIp?.toString()
+  if(recordedIp && recordedIp != player.getDataValue('deviceIp')?.toString()?.trim()) { return false }
+  if(election.lastPayloadAt == null) {
+    return (nowMs - ((election.electedAt ?: 0L) as Long)) < ZGT_ELECTION_PAYLOAD_TIMEOUT_MS
+  }
+  return true
+}
+
+/** Clear the election when `dni` holds it. Returns true when it did, so the caller can start a re-election. */
+Boolean evictZgtSubscriber(String dni, String reason) {
+  Boolean evicted = false
+  mutateAppData(READY_FOR_ZGT_STATE_KEY) { Object current ->
+    Map election = normalizeZgtElection(current, now())
+    if(election != null && election.dni == dni) {
+      logInfo("Evicting ZGT subscriber ${dni}: ${reason}")
+      evicted = true
+      return null
+    }
+    return current
+  }
+  if(evicted) { runInMillis(1, 'requestZgtReelection', [overwrite: false, data: [excludeDni: dni]]) }
+  return evicted
+}
+
+/** Timer set at election: evict the winner when it never delivered a payload. */
+void checkZgtElectionPayload() {
+  Map election = normalizeZgtElection(atomicState[READY_FOR_ZGT_STATE_KEY], now())
+  if(election != null && election.lastPayloadAt == null && !zgtSubscriberAlive(election, now())) {
+    evictZgtSubscriber(election.dni?.toString(), 'no ZGT payload within the election window')
+  }
+}
+
+/** Ask every other player to repeat its election request; the first eligible one becomes the subscriber. */
+void requestZgtReelection(Map data) {
+  String excludeDni = data?.excludeDni?.toString()
+  getChildDevices().findAll { ChildDeviceWrapper child ->
+    child.getDataValue('id') && child.getDeviceNetworkId() != excludeDni && !child.getDeviceNetworkId()?.contains('SonosGroupDevice')
+  }.each { ChildDeviceWrapper child ->
+    try { child.reevaluateZgtElection() }
+    catch(Exception e) { logDebug("Could not ask ${child.getDeviceNetworkId()} to re-run the ZGT election: ${e.message}") }
+  }
 }
 
 Boolean playerAppRequestHandler(Object event) {
@@ -3130,6 +3212,9 @@ Boolean playerAppRequestHandler(Object event) {
         overwrite: false,
         data: [playerDni: playerDni, result: readyForZgt(playerDni)]
       ])
+      return true
+    case 'reportPlayerOffline':
+      evictZgtSubscriber(playerDni, 'player reported offline')
       return true
     case 'needCurrentlyPlayingStates':
       runInMillis(1, 'republishCurrentlyPlayingStates', [
@@ -6095,11 +6180,23 @@ void setZgtPayload(Map<String, Object> payload) {
   synchronized(appLock('zgt')) {
     if(!acceptSequence("${payload.sourceDni}:zgt".toString(), payload.epoch, payload.sequence)) { return }
     atomicState[ZGT_PAYLOAD_STATE_KEY] = snapshot
+    recordZgtPayloadDelivery(payload.sourceDni?.toString())
     storeUpnpTopology([sourceDni: 'elected-subscriber',
         eventsByGroupId: buildZgtEventProjection(snapshot)])
     stored = true
   }
   if(stored) { runInMillis(1, 'publishZgtPlayerAttributes', [overwrite: true]) }
+}
+
+/** Mark the elected subscriber as delivering payloads, which ends its first-payload deadline. */
+void recordZgtPayloadDelivery(String sourceDni) {
+  Long nowMs = now()
+  mutateAppData(READY_FOR_ZGT_STATE_KEY) { Object current ->
+    Map election = normalizeZgtElection(current, nowMs)
+    if(election == null || election.dni != sourceDni) { return current }
+    election.lastPayloadAt = nowMs
+    return election
+  }
 }
 
 /** Convert the two-map transport into the existing internal topology event shape. */

@@ -1049,6 +1049,7 @@ metadata {
 @Field static final String LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY = 'sid6'
 @Field static final String LEGACY_CONTENT_DIRECTORY_EXPIRES_DEVICE_KEY = 'sid6-expires'
 @Field static final String ZGT_ELIGIBLE_RUNTIME_KEY = 'zgtElectionEligible'
+@Field static final String ZGT_OFFLINE_REPORTED_RUNTIME_KEY = 'zgtOfflineReported'
 @Field static final String CATALOG_REFRESH_OWNER_RUNTIME_KEY = 'catalogRefreshOwner'
 @Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
@@ -1606,9 +1607,13 @@ void websocketHealthCheck() {
 
     if(!isWebsocketConnected()) {
       logInfo('WebSocket health check found the connection closed; reconnecting.')
+      // Let the parent drop this player as ZGT subscriber so another eligible player takes over.
+      runtimeState[ZGT_OFFLINE_REPORTED_RUNTIME_KEY] = true
+      sendParentAppRequest('reportPlayerOffline')
       scheduleWebSocketReconnect()
       return
     }
+    if(runtimeState.remove(ZGT_OFFLINE_REPORTED_RUNTIME_KEY) != null) { reevaluateZgtElection() }
 
     // Open but not subscribed means the subscribe request or its response was lost.
     if(getWsSubscriptionValue('audioClip') != 'Subscribed') {
@@ -2019,6 +2024,11 @@ Boolean sendParentAppRequest(String action, Map args = [:], Map observedStamp = 
     logWarn("parent.playerAppRequest failed for ${action}: ${e.message}")
     return false
   }
+}
+
+/** Parent asks eligible players to repeat their election request after the subscriber was evicted. */
+void reevaluateZgtElection() {
+  if(runtimeState[ZGT_ELIGIBLE_RUNTIME_KEY] == true) { sendParentAppRequest('requestZgtElection') }
 }
 
 /** Parent's answer to requestZgtElection, delivered from an app-side scheduled execution. */
