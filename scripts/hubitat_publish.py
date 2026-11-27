@@ -3,7 +3,7 @@
 Sonos Advanced (SAC) Publisher for the C7 hub.
 
 Publishes the Sonos Advanced app and all of its component drivers to the
-C7 hub (192.168.1.3) with no arguments and no prompting. Each file is
+C7 hub (HUB_HOST below) with no arguments and no prompting. Each file is
 matched on the hub by its definition name + namespace and updated in
 place; if no match exists, it is created.
 
@@ -12,7 +12,9 @@ Usage:
 
 Per-file results are printed as each file completes, followed by a
 summary. Every result is also appended to hubitat_publish.log next to
-this script (git-ignored), one JSON line per file per run.
+this script (git-ignored), one JSON line per file per run. Each line
+records the hub it was published to, and only lines for HUB_HOST count
+below, so pointing the script at another hub starts with a full push.
 
 On startup the log is read back to decide what to push:
 
@@ -42,7 +44,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Hard-coded SAC / C7 targets
 # ---------------------------------------------------------------------------
-HUB_HOST = "192.168.1.3"
+HUB_HOST = "192.168.1.4"
 
 # SAC = the discovery child app, controller app, and all component drivers.
 # The controller is published last. Paths are relative to the repository root.
@@ -434,8 +436,11 @@ def log_path():
     return Path(__file__).resolve().parent / LOG_FILENAME
 
 
-def read_last_statuses(path):
-    """Return {relpath: status} from the most recent log entry per file.
+def read_last_statuses(path, hub_host):
+    """Return {relpath: status} from the most recent log entry per file on hub_host.
+
+    Entries recorded for another hub, or before entries named their hub,
+    are ignored: a retry history only applies to the hub it came from.
 
     "status" is "success" or "failed". Non-result lines (run/summary
     markers, blank lines, corrupt JSON) are skipped. Returns an empty
@@ -455,6 +460,8 @@ def read_last_statuses(path):
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if entry.get("hub") != hub_host:
+            continue
         relpath = entry.get("file")
         status = entry.get("status")
         if relpath and status in ("success", "failed"):
@@ -464,7 +471,7 @@ def read_last_statuses(path):
 
 def append_log(path, entry):
     """Append one JSON line to the log. Logging must never break a publish."""
-    entry = {"ts": datetime.now(timezone.utc).isoformat(), **entry}
+    entry = {"ts": datetime.now(timezone.utc).isoformat(), "hub": HUB_HOST, **entry}
     try:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
@@ -504,7 +511,7 @@ def main():
     root = repo_root()
     log = log_path()
 
-    last_statuses = read_last_statuses(log)
+    last_statuses = read_last_statuses(log, HUB_HOST)
     targets, mode_line = select_targets(last_statuses)
     print(f"C7 ({HUB_HOST}) — {mode_line}.")
     print(f"Log: {log}")
