@@ -64,18 +64,26 @@ preferences {
 @Field static final String DISCOVERY_RUNNING_KEY = 'discoveryRunning'
 @Field static final String DISCOVERY_END_TIME_KEY = 'discoveryEndTime'
 @Field static final String DISCOVERY_PROBE_ATTEMPTS_KEY = 'discoveryProbeAttempts'
-@Field static final String QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY = 'quickTopologyRequestId'
+@Field static final String QUICK_TOPOLOGY_REQUESTS_STATE_KEY = 'quickTopologyRequests'
+@Field static final String PENDING_DISCOVERY_CANDIDATES_STATE_KEY = 'pendingDiscoveryCandidates'
 @Field static final String NEW_UI_GROUP_TABLE_EVENT = 'newUiGroupsTable'
 @Field static final String NEW_UI_GROUP_DELETE_KEY = 'pendingNewUiDeleteGroup'
 @Field static final String PENDING_GROUP_DEVICE_ACK_KEY = 'pendingGroupDeviceAcknowledgement'
-@Field static final String QUICK_TOPOLOGY_BATCH_STATE_KEY = 'quickTopologyRefreshBatch'
-@Field static final String QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY = 'quickTopologyQueriedDuringDiscovery'
+@Field static final String PENDING_PLAYER_TABLE_REFRESH_KEY = 'pendingPlayerTableRefresh'
+@Field static final String RINCON_PATTERN = '^RINCON_([0-9A-Fa-f]{12})0([1-9][0-9]{3})$'
+// UPnP ports whose players SAC provisions. Multi-zone hardware (Amp Multi zones, the Arc/Ace headphone
+// zone) answers on 1500-1700 with its own RINCON but shares one MAC and IP, so those stay unsupported
+// until subscription demultiplexing through the 1400 host device exists. Widen this set to enable them.
+@Field static final Set<Integer> SUPPORTED_UPNP_PORTS = Collections.unmodifiableSet(new HashSet<Integer>([1400]))
+// The host player's port. Only this endpoint serves ZoneGroupTopology, so only a hit here may seed a topology request.
+@Field static final Integer HOST_UPNP_PORT = 1400
+@Field static final Integer PLAYER_TABLE_REFRESH_MAX_ATTEMPTS = 15
 @Field static final List<String> QUICK_TOPOLOGY_DEVICE_ATTRIBUTE_NAMES = [
   'UUID', 'Location', 'ZoneName', 'Icon', 'Configuration', 'SoftwareGeneration',
   'MinCompatibleVersion', 'LegacyCompatibleVersion', 'BootSeq', 'TVConfiguration',
   'WirelessMode', 'HasConfiguredSSID', 'ChannelFreq', 'BehindWifiExtender', 'WifiEnabled',
   'EthLink', 'VoiceConfigState', 'MicEnabled', 'Invisible', 'HdmiCecAvailable',
-  'HdmiArcAvailable', 'ModelName', 'ModelDisplayName', 'SWGen'
+  'HdmiArcAvailable', 'ModelName', 'ModelDisplayName', 'SWGen', 'SSLPort', 'ChannelMapSet', 'HTSatChanMapSet'
 ]
 Map getDiscoveredSonoses() {
   if(!(state.discoveredSonoses instanceof Map)) { state.discoveredSonoses = [:] }
@@ -180,9 +188,6 @@ void importLegacyDiscoveryState() {
     Boolean importedGroups = legacy?.groupConfigurations instanceof Map && !(state.groupConfigurations instanceof Map)
     if(importedGroups) {
       state.groupConfigurations = copyGroupConfigurations((Map)legacy.groupConfigurations)
-    }
-    if(legacy?.playerDevices != null && settings.playerDevices == null) {
-      app.updateSetting('playerDevices', [type: 'enum', value: legacy.playerDevices])
     }
     if(importedGroups) {
       Map sync = parent.submitGroupConfigurationSync([
@@ -776,8 +781,6 @@ void appButtonHandler(String buttonName) {
   if(buttonName == 'btnNewUiDiscoverSpeakers') { startNewUiDiscoverySession(); return }
   if(buttonName == 'btnExtend60') { extendDiscovery(60); return }
   if(buttonName == 'btnExtend300') { extendDiscovery(300); return }
-  if(buttonName == 'createSelectedPlayers') { submitSelectedPlayers(); return }
-  if(buttonName == 'removeUnselectedPlayers') { submitPlayerRemoval(); return }
   if(buttonName == 'deleteManagedGroup') { deleteManagedGroup(); return }
   if(buttonName?.startsWith('newUiDeleteGroup|')) {
     Map row = findNewUiGroupByToken(buttonName.substring('newUiDeleteGroup|'.length()))
@@ -789,13 +792,8 @@ void appButtonHandler(String buttonName) {
     return
   }
   if(buttonName?.startsWith('newUiCreatePlayer|')) {
-    String key = buttonName.substring('newUiCreatePlayer|'.length())
-    List<String> selected = settings.playerDevices instanceof Collection ? ((Collection)settings.playerDevices).collect { Object v -> v.toString() } : []
-    if(!selected.contains(key)) { selected << key }
-    app.updateSetting('playerDevices', [type: 'enum', value: selected])
-    // A row action creates only the clicked speaker; other saved selections may be stale (offline or not rediscovered)
-    // and would make the parent reject the whole request.
-    submitSelectedPlayers([key])
+    // The row's add button creates exactly the clicked speaker.
+    queuePlayerCreation(buttonName.substring('newUiCreatePlayer|'.length()))
     return
   }
   if(buttonName?.startsWith('newUiDeletePlayer|')) {
@@ -805,12 +803,8 @@ void appButtonHandler(String buttonName) {
   if(buttonName == 'btnConfirmNewUiDeletePlayer') {
     String key = state.pendingNewUiDeletePlayer?.toString()
     Map row = buildNewUiSpeakerRows().find { Map item -> item.discoveryKey?.toString() == key || item.id?.toString() == key }
-    Map snapshot = parent.getProvisioningSnapshot() as Map ?: [:]
-    List<String> selected = settings.playerDevices instanceof Collection ? ((Collection)settings.playerDevices).collect { Object v -> v.toString() } : new ArrayList<String>(((Map)snapshot.players ?: [:]).keySet())
     String dni = row?.discoveryKey?.toString()
-    if(dni) { selected.remove(dni) }
-    app.updateSetting('playerDevices', [type: 'enum', value: selected])
-    // Remove only the confirmed speaker; other installed speakers may be absent from the saved selection.
+    // Remove only the confirmed speaker.
     if(dni) { queuePlayerRemoval([dni]) }
     state.remove('pendingNewUiDeletePlayer')
     return
@@ -934,18 +928,6 @@ void deleteManagedGroup(String nameOverride = null) {
   state.groupManagementMessage = 'Group removal has been queued.'
 }
 
-void submitSelectedPlayers(List<String> selectedOverride = null) {
-  Map snapshot = parent.getProvisioningSnapshot() as Map ?: [:]
-  // Button handlers pass their selection explicitly: updateSetting() is not guaranteed to be
-  // visible through settings within the same execution.
-  List<String> selected = selectedOverride != null ? selectedOverride : settings.playerDevices instanceof Collection
-      ? ((Collection)settings.playerDevices).collect { Object value -> value.toString() } : new ArrayList<String>(((Map)snapshot.players ?: [:]).keySet())
-  Map request = [schemaVersion: 1, requestId: UUID.randomUUID().toString(), selected: selected,
-      players: copyCandidateInfoMap(discoveredSonoses), secondaries: copyCandidateInfoMap(discoveredSonosSecondaries)]
-  Map result = parent.submitPlayerProvisioningRequest(request) as Map
-  state.playerRequestMessage = result?.accepted == true ? 'Speaker creation has been queued.' : 'Speaker creation could not be queued.'
-}
-
 Map<String, Map> copyCandidateInfoMap(Map source) {
   Map<String, Map> copy = [:]
   source.each { Object key, Object value ->
@@ -991,17 +973,10 @@ Object copyCandidateValue(Object value, Integer depth) {
   return null
 }
 
-void submitPlayerRemoval() {
-  Map snapshot = parent.getProvisioningSnapshot() as Map ?: [:]
-  List<String> existing = new ArrayList<String>(((Map)snapshot.players ?: [:]).keySet())
-  List<String> selected = settings.playerDevices instanceof Collection
-      ? ((Collection)settings.playerDevices).collect { Object value -> value.toString() } : existing
-  queuePlayerRemoval(existing.findAll { String dni -> !selected.contains(dni) })
-}
-
 void queuePlayerRemoval(List<String> remove) {
   Map result = parent.submitPlayerRemovalRequest([schemaVersion: 1, requestId: UUID.randomUUID().toString(), remove: remove]) as Map
   state.playerRequestMessage = result?.accepted == true ? 'Speaker removal has been queued.' : 'Speaker removal could not be queued.'
+  if(result?.accepted == true) { schedulePlayerTableRefresh([], remove) }
 }
 
 void logError(String message) { if(getConfiguredLogLevel() in ['trace', 'debug', 'info', 'warn', 'error']) { log.error("${app.label ?: app.name}: ${message}") } }
@@ -1020,7 +995,6 @@ void logPayloadAtTrace(String debugMessage, String traceMessage) {
 Integer convertHexToInt(String hex) { return Integer.parseInt(hex, 16) }
 String convertHexToIP(String hex) { return [convertHexToInt(hex[0..1]), convertHexToInt(hex[2..3]), convertHexToInt(hex[4..5]), convertHexToInt(hex[6..7])].join('.') }
 String getLocalApiPrefix(String ipAddress) { return "https://${ipAddress}/api/v1" }
-String getDNIFromRincon(String rincon) { return rincon?.replace(':', '') }
 List<String> splitTokens(String value, String delimiters) { return value ? StringUtils.split(value, delimiters)?.toList() ?: [] : [] }
 
 String displayNewUiSpeakerTable() {
@@ -1939,9 +1913,11 @@ void startDiscoverySession() {
   discoveredSonoses.clear()
   discoveredSonosSecondaries.clear()
   atomicState[DISCOVERY_PROBE_ATTEMPTS_KEY] = [:]
-  state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
-  state.remove(QUICK_TOPOLOGY_BATCH_STATE_KEY)
-  atomicState.remove(QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY)
+  state.remove(QUICK_TOPOLOGY_REQUESTS_STATE_KEY)
+  state.remove(PENDING_DISCOVERY_CANDIDATES_STATE_KEY)
+  // Transient keys written by earlier versions of the per-speaker topology batch.
+  ['quickTopologyRequestId', 'quickTopologyRefreshBatch'].each { String legacyKey -> state.remove(legacyKey) }
+  atomicState.remove('quickTopologyQueriedDuringDiscovery')
   String sessionId = UUID.randomUUID().toString()
   atomicState.discoverySessionId = sessionId
   subscribeToSsdpEvents(location)
@@ -1989,8 +1965,8 @@ void stopDiscovery(Map data = [:]) {
   atomicState[DISCOVERY_RUNNING_KEY] = false
   atomicState[DISCOVERY_END_TIME_KEY] = null
   atomicState.discoverySessionId = UUID.randomUUID().toString()
-  state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
-  state.remove(QUICK_TOPOLOGY_BATCH_STATE_KEY)
+  state.remove(QUICK_TOPOLOGY_REQUESTS_STATE_KEY)
+  state.remove(PENDING_DISCOVERY_CANDIDATES_STATE_KEY)
   app.sendEvent(name: 'discoveryTimer', value: '0')
   // Clean up legacy state keys (migration from state → atomicState)
   state.remove(DISCOVERY_RUNNING_KEY)
@@ -2139,145 +2115,116 @@ void processMdnsDiscovery(Map data = [:]) {
   }
 }
 
-Boolean isIpAlreadyDiscovered(String ipAddress) {
-  Boolean alreadyDiscovered = discoveredSonoses.values().any { it.deviceIp == ipAddress }
-  Boolean alreadyDiscoveredSecondary = discoveredSonosSecondaries.values().any { it.deviceIp == ipAddress }
-  return alreadyDiscovered || alreadyDiscoveredSecondary
+// =============================================================================
+// RINCON identity and discovery candidates
+// =============================================================================
+
+/**
+ * Parse RINCON_&lt;12 hex MAC&gt;0&lt;4 digit UPnP port&gt;. Returns rincon, mac (upper case) and upnpPort,
+ * or null when the value is not that shape. The shape is parsed generally; which ports SAC provisions
+ * is a separate policy (SUPPORTED_UPNP_PORTS). Keep the original RINCON as the player identity and never
+ * rebuild it from the MAC.
+ */
+@CompileStatic
+Map<String, Object> parseRincon(String rincon) {
+  String value = rincon?.trim()
+  if(!value || !value.matches(RINCON_PATTERN)) { return null }
+  Map<String, Object> parsed = new LinkedHashMap<String, Object>()
+  parsed.put('rincon', value)
+  parsed.put('mac', value.substring(7, 19).toUpperCase(Locale.ROOT))
+  parsed.put('upnpPort', Integer.valueOf(value.substring(20)))
+  return parsed
 }
 
-Boolean reserveDiscoveryProbe(String ipAddress) {
-  if(!ipAddress) {
-    logDebug('Skipping discovery probe because the candidate IP address is empty')
+@CompileStatic
+Boolean isSupportedUpnpPort(Integer upnpPort) {
+  return upnpPort != null && SUPPORTED_UPNP_PORTS.contains(upnpPort)
+}
+
+/**
+ * Discovery and DNI key. The host (1400) player keeps the bare MAC so existing DNIs and saved selections
+ * stay valid. Other zones on the same hardware share that MAC, so their key is reserved as MAC-port.
+ */
+@CompileStatic
+String buildPlayerKey(String mac, Integer upnpPort) {
+  return upnpPort == HOST_UPNP_PORT ? mac : "${mac}-${upnpPort}".toString()
+}
+
+/** RINCON of the host (1400) player on the hardware that owns this MAC. */
+@CompileStatic
+String buildHostRincon(String mac) {
+  return "RINCON_${mac}0${HOST_UPNP_PORT}".toString()
+}
+
+Boolean isKnownDiscoveryIp(String ipAddress) {
+  Boolean primary = discoveredSonoses.values().any { Object raw -> raw instanceof Map && ((Map)raw).deviceIp?.toString() == ipAddress }
+  Boolean secondary = discoveredSonosSecondaries.values().any { Object raw -> raw instanceof Map && ((Map)raw).deviceIp?.toString() == ipAddress }
+  return primary || secondary
+}
+
+Boolean reserveDiscoveryProbe(String endpoint) {
+  if(!endpoint) {
+    logDebug('Skipping discovery probe because the candidate endpoint is empty')
     return false
   }
   if(atomicState[DISCOVERY_RUNNING_KEY] != true) {
-    logDebug("Skipping discovery probe for ${ipAddress}; discovery session is stopped")
+    logDebug("Skipping discovery probe for ${endpoint}; discovery session is stopped")
     return false
   }
   synchronized(this) {
     Map attempts = (atomicState[DISCOVERY_PROBE_ATTEMPTS_KEY] ?: [:]) as Map
-    // Keep every IP reserved for the full discovery session, including failures and
-    // unsupported secondary speakers. A new session resets this map in ssdpDiscover().
-    if(attempts.containsKey(ipAddress)) {
-      logDebug("Skipping discovery probe for ${ipAddress}; already attempted this session at ${attempts[ipAddress]}")
+    // Keep every endpoint reserved for the full discovery session, including failures.
+    // A new session resets this map in startDiscoverySession() and ssdpDiscover().
+    if(attempts.containsKey(endpoint)) {
+      logDebug("Skipping discovery probe for ${endpoint}; already attempted this session at ${attempts[endpoint]}")
       return false
     }
     Map updated = new LinkedHashMap(attempts)
-    updated[ipAddress] = now()
+    updated[endpoint] = now()
     atomicState[DISCOVERY_PROBE_ATTEMPTS_KEY] = updated
-    logDebug("Reserved ${ipAddress} for a discovery probe; ${updated.size()} unique IP(s) attempted this session")
+    logDebug("Reserved ${endpoint} for a topology request; ${updated.size()} unique endpoint(s) attempted this session")
     return true
   }
 }
 
-void requestDiscoveryDeviceDescription(String ipAddress, LinkedHashMap playerInfo) {
+/**
+ * An mDNS or SSDP hit is only a hint that a Sonos speaker lives at this endpoint. One ZoneGroupTopology
+ * request to it lists the whole household, so a hit is ignored when its IP is already known, when
+ * another topology request is in flight, or when it is not the host (1400) endpoint.
+ */
+void considerDiscoveryCandidate(String ipAddress, Integer upnpPort) {
+  String host = ipAddress?.trim()
+  if(!host) { return }
+  logDebug("Considering discovery candidate at ${host}:${upnpPort}")
   if(atomicState[DISCOVERY_RUNNING_KEY] != true) {
-    logDebug("Skipping device-description request for ${ipAddress}; discovery stopped before player-info callback")
+    logDebug("Skipping discovery candidate ${host}:${upnpPort}; discovery session is stopped")
     return
   }
-  requestSonosDeviceDescription(ipAddress, playerInfo, 'discoveryDeviceDescriptionCallback', [ipAddress: ipAddress, sessionId: atomicState.discoverySessionId])
-}
-
-Boolean requestSonosDeviceDescription(String ipAddress, LinkedHashMap playerInfo, String callback,
-    Map callbackData) {
-  Map params = [uri: "http://${ipAddress}:1400/xml/device_description.xml", timeout: 3,
-    requestContentType: 'application/xml', contentType: 'application/xml']
-  Map data = new LinkedHashMap(callbackData ?: [:])
-  data.ipAddress = ipAddress
-  data.playerInfo = playerInfo
-  try {
-    logDebug("Dispatching asynchronous device-description probe for ${ipAddress} (timeout=3s)")
-    asynchttpGet(callback, params, data)
-    return true
-  } catch(Exception e) {
-    logDebug("Could not dispatch device-description probe for ${ipAddress}: ${e.message}")
-    return false
-  }
-}
-
-void discoveryPlayerInfoCallback(AsyncResponse response, Map data) {
-  String ipAddress = data?.ipAddress?.toString()
-  if(!ipAddress) { logDebug('Player-info callback received without an IP address'); return }
-  if(data?.sessionId?.toString() != atomicState.discoverySessionId?.toString()) { return }
-  if(atomicState[DISCOVERY_RUNNING_KEY] != true) {
-    logDebug("Ignoring player-info callback for ${ipAddress}; discovery session has stopped")
+  if(upnpPort != HOST_UPNP_PORT) {
+    logDebug("Ignoring discovery candidate ${host}:${upnpPort}; only the ${HOST_UPNP_PORT} endpoint serves topology")
     return
   }
-  if(response == null || response.hasError()) {
-    logDebug("Player-info probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
+  if(isKnownDiscoveryIp(host)) {
+    logDebug("Skipping discovery candidate ${host}; it is already in the discovered results")
     return
   }
-  try {
-    Map playerInfo = response.getJson() as Map
-    if(!playerInfo) {
-      logDebug("Player-info probe for ${ipAddress} returned an empty or non-object JSON response (status=${response.status})")
-      return
+  if(hasQuickTopologyRequestInFlight()) {
+    // Keep it: if the request in flight fails or does not list this speaker, it is tried next.
+    synchronized(this) {
+      List<String> pending = getPendingDiscoveryCandidates()
+      if(!pending.contains(host)) { pending << host }
+      state[PENDING_DISCOVERY_CANDIDATES_STATE_KEY] = pending
     }
-    logDebug("Player-info probe succeeded for ${ipAddress} (status=${response.status}, playerId=${playerInfo.playerId}, name=${playerInfo.device?.name})")
-    requestDiscoveryDeviceDescription(ipAddress, new LinkedHashMap(playerInfo))
-  } catch(Exception e) { logDebug("Could not parse player-info response for ${ipAddress} (status=${response.status}): ${e.message}") }
-}
-
-void discoveryDeviceDescriptionCallback(AsyncResponse response, Map data) {
-  String ipAddress = data?.ipAddress?.toString()
-  if(!ipAddress) { logDebug('Device-description callback received without an IP address'); return }
-  if(data?.sessionId?.toString() != atomicState.discoverySessionId?.toString()) { return }
-  if(atomicState[DISCOVERY_RUNNING_KEY] != true) {
-    logDebug("Ignoring device-description callback for ${ipAddress}; discovery session has stopped")
+    logDebug("Queued discovery candidate ${host}; a topology request is already in flight")
     return
   }
-  if(response == null || response.hasError()) {
-    logDebug("Device-description probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
-    return
-  }
-  try {
-    String responseBody = response.getData() as String
-    if(!responseBody) {
-      logDebug("Device-description probe for ${ipAddress} returned an empty body (status=${response.status})")
-      return
-    }
-    GPathResult description = new XmlSlurper().parseText(responseBody)
-    logDebug("Device-description probe succeeded for ${ipAddress} (status=${response.status}, model=${description.device.modelName.text()})")
-    processSonosDeviceInfo(data.playerInfo as LinkedHashMap, description, ipAddress)
-  } catch(Exception e) { logDebug("Could not parse device-description response for ${ipAddress} (status=${response.status}): ${e.message}") }
+  if(!reserveDiscoveryProbe("${host}:${upnpPort}".toString())) { return }
+  requestQuickTopologyRefresh(host)
 }
 
-void requestDiscoveryPlayerInfo(String ipAddress) {
-  if(atomicState[DISCOVERY_RUNNING_KEY] != true) {
-    logDebug("Skipping player-info request for ${ipAddress}; discovery session has stopped")
-    return
-  }
-  requestSonosPlayerInfo(ipAddress, 'discoveryPlayerInfoCallback', [ipAddress: ipAddress, sessionId: atomicState.discoverySessionId])
-}
-
-Boolean requestSonosPlayerInfo(String ipAddress, String callback, Map callbackData) {
-  Map params = [uri: "${getLocalApiPrefix("${ipAddress}:1443")}/players/local/info",
-    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
-    requestContentType: 'application/json', contentType: 'application/json', ignoreSSLIssues: true, timeout: 3]
-  try {
-    logDebug("Dispatching asynchronous player-info probe for ${ipAddress}:1443 (timeout=3s)")
-    asynchttpGet(callback, params, callbackData ?: [ipAddress: ipAddress])
-    return true
-  } catch(Exception e) {
-    logDebug("Could not dispatch player-info probe for ${ipAddress}: ${e.message}")
-    return false
-  }
-}
-
+/** mDNS carries no UPnP port (_sonos._tcp advertises the API port), so a hit stands for the host endpoint. */
 void processDiscoveredSonosDevice(String ipAddress) {
-  if(!ipAddress) { return }
-  if(atomicState[DISCOVERY_RUNNING_KEY] != true) {
-    logDebug("processDiscoveredSonosDevice: discovery not running, skipping")
-    return
-  }
-
-  logDebug("Considering mDNS discovery candidate at ${ipAddress}")
-  if(isIpAlreadyDiscovered(ipAddress)) {
-    logDebug("Skipping mDNS candidate ${ipAddress}; device is already in discovered results")
-    return
-  }
-  if(!reserveDiscoveryProbe(ipAddress)) { return }
-  requestDiscoveryPlayerInfo(ipAddress)
+  considerDiscoveryCandidate(ipAddress, HOST_UPNP_PORT)
 }
 
 @CompileStatic
@@ -2300,149 +2247,47 @@ void ssdpEventHandler(Event event) {
 @CompileStatic
 void processParsedSsdpEvent(LinkedHashMap event) {
   String ipAddress = convertHexToIP(event?.networkAddress as String)
-  String ipPort = convertHexToInt(event?.deviceAddress as String).toString()
-  logDebug("Considering SSDP discovery candidate at ${ipAddress}:${ipPort}")
-
-  // Devices send multiple SSDP responses; reserve each IP before issuing async probes.
-  if(isIpAlreadyDiscovered(ipAddress)) {
-    logDebug("Skipping SSDP candidate ${ipAddress}; device is already in discovered results")
-    return
-  }
-  if(!reserveDiscoveryProbe(ipAddress)) {
-    return
-  }
-
-  requestDiscoveryPlayerInfo(ipAddress)
+  Integer ipPort = convertHexToInt(event?.deviceAddress as String)
+  considerDiscoveryCandidate(ipAddress, ipPort)
 }
 
-@CompileStatic
-void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescription, String ipAddress,
-    Map topologyInfo = null, Boolean publishDiscoveryUpdates = true) {
-  LinkedHashMap playerInfoDevice = playerInfo?.device as LinkedHashMap
+// =============================================================================
+// Household topology: one request lists every player
+// =============================================================================
 
-  String modelName = deviceDescription['device']['modelName']
-	String mac = (deviceDescription['device']['MACAddress']).toString().replace(':','')
-  String playerName = playerInfoDevice?.name
-  String playerDni = mac
-  String swGen = playerInfoDevice?.swGen
-  String householdId = playerInfo?.householdId
-  String playerId = playerInfo?.playerId
-  String groupId = playerInfo?.groupId
-  List<String> deviceCapabilities = playerInfoDevice?.capabilities as List<String>
+Map getQuickTopologyRequests() {
+  Object raw = state[QUICK_TOPOLOGY_REQUESTS_STATE_KEY]
+  return raw instanceof Map ? new LinkedHashMap((Map)raw) : [:]
+}
 
-  if(mac && playerInfoDevice?.name) {
-    logDebug("Processing Sonos device: MAC=${mac}, name=${playerInfoDevice?.name}, IP=${ipAddress}")
-  }
+List<String> getPendingDiscoveryCandidates() {
+  Object raw = state[PENDING_DISCOVERY_CANDIDATES_STATE_KEY]
+  return raw instanceof Collection ? new ArrayList<String>(((Collection)raw).collect { Object host -> host.toString() }) : new ArrayList<String>()
+}
 
-  // Use MAC as primary key, but also check for duplicate IPs/playerIds to prevent same device listed multiple times
-  // Check against both primary and secondary maps
-  // O(1) MAC check first (most common case), then .any{} for early exit on IP/playerId match
-  boolean isDuplicate = false
-  if(discoveredSonoses.containsKey(mac)) {
-    isDuplicate = true
-    // Update the existing entry with latest info to keep it fresh
-    LinkedHashMap existingDevice = discoveredSonoses[mac] as LinkedHashMap
-    existingDevice.deviceIp = ipAddress
-    existingDevice.remove('localApiUrl')
-    existingDevice.remove('localUpnpUrl')
-    existingDevice.remove('localUpnpHost')
-    existingDevice.remove('websocketUrl')
-    if(topologyInfo) { existingDevice.topologyInfo = new LinkedHashMap(topologyInfo) }
-    logDebug("Device already discovered in primaries (MAC match) - MAC: ${mac}, IP: ${ipAddress}")
-  }
-  if(!isDuplicate) {
-    isDuplicate = discoveredSonoses.any { key, value ->
-      LinkedHashMap existingDevice = value as LinkedHashMap
-      existingDevice.id == playerId || existingDevice.deviceIp == ipAddress
+/** After a topology request finishes, try the next queued candidate that is still unknown. */
+void startNextPendingDiscoveryCandidate() {
+  while(!hasQuickTopologyRequestInFlight() && atomicState[DISCOVERY_RUNNING_KEY] == true) {
+    String host = null
+    synchronized(this) {
+      List<String> pending = getPendingDiscoveryCandidates()
+      if(pending.isEmpty()) { return }
+      host = pending.remove(0)
+      if(pending.isEmpty()) { state.remove(PENDING_DISCOVERY_CANDIDATES_STATE_KEY) } else { state[PENDING_DISCOVERY_CANDIDATES_STATE_KEY] = pending }
     }
-    if(isDuplicate) { logDebug("Device already discovered in primaries (IP/ID match) - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
-  }
-  if(!isDuplicate) {
-    isDuplicate = discoveredSonosSecondaries.containsKey(mac) || discoveredSonosSecondaries.any { key, value ->
-      LinkedHashMap existingDevice = value as LinkedHashMap
-      existingDevice.id == playerId || existingDevice.deviceIp == ipAddress
-    }
-    if(isDuplicate) { logDebug("Device already discovered in secondaries - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
-  }
-
-  if(isDuplicate) {
-    if(topologyInfo) {
-      [discoveredSonoses, discoveredSonosSecondaries].each { Map<String, LinkedHashMap> devices ->
-        Object match = devices.values().find { Object rawCandidate ->
-          if(!(rawCandidate instanceof Map)) { return false }
-          Map candidate = (Map)rawCandidate
-          return candidate.id?.toString() == playerId || candidate.deviceIp?.toString() == ipAddress
-        }
-        if(match instanceof Map) { ((Map)match).topologyInfo = new LinkedHashMap(topologyInfo) }
-      }
-    }
-    return
-  }
-
-  LinkedHashMap discoveredSonos = [
-    name: playerName,
-    id: playerId,
-    swGen: swGen,
-    capabilities: deviceCapabilities,
-    modelName: modelName,
-    householdId: householdId,
-    deviceIp: "${ipAddress}",
-    topologyInfo: topologyInfo ? new LinkedHashMap(topologyInfo) : [:]
-  ]
-  // Handle secondary/satellite devices (subs, surrounds, right channel in stereo pair)
-  if(playerInfoDevice?.primaryDeviceId) {
-    LinkedHashMap discoveredSonosSecondary = [
-      primaryDeviceId: playerInfoDevice?.primaryDeviceId,
-      id: playerId,
-      swGen: swGen,
-      capabilities: deviceCapabilities,
-      modelName: modelName,
-      householdId: householdId,
-      deviceIp: "${ipAddress}",
-      topologyInfo: topologyInfo ? new LinkedHashMap(topologyInfo) : [:]
-    ]
-    // Check for duplicate secondaries
-    boolean secondaryExists = discoveredSonosSecondaries.values().any { secondaryDevice ->
-      LinkedHashMap secondary = secondaryDevice as LinkedHashMap
-      return secondary.id == playerId
-    }
-    if(!secondaryExists) {
-      discoveredSonosSecondaries[mac] = discoveredSonosSecondary
-      persistDiscoveredSonosSecondaries()
-      logInfo("Discovered secondary ${modelName} (${playerId}) for primary ${playerInfoDevice?.primaryDeviceId}")
-    }
-    
-    // Secondary devices should never appear in the main discovered list
-    if(publishDiscoveryUpdates) {
-      requestQuickTopologyDuringDiscovery(ipAddress)
-      scheduleFoundSonosEvents()
-    }
-    return
-  }
-
-  // Only primary (standalone) devices reach here
-  if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
-    discoveredSonoses[mac] = discoveredSonos
-    logInfo("Discovered Sonos device: ${playerName} (${modelName}) at ${ipAddress}")
-    if(publishDiscoveryUpdates) {
-      requestQuickTopologyDuringDiscovery(ipAddress)
-      scheduleFoundSonosEvents()
-    }
-  } else {
-    logDebug("Device id:${discoveredSonos?.id} responded to discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
+    if(isKnownDiscoveryIp(host)) { continue }
+    if(!reserveDiscoveryProbe("${host}:${HOST_UPNP_PORT}".toString())) { continue }
+    requestQuickTopologyRefresh(host)
   }
 }
 
-/** Schedule a discovery UI refresh outside the statically compiled processing path. */
-void scheduleFoundSonosEvents() {
-  String sessionId = atomicState[DISCOVERY_SESSION_ID_KEY]?.toString()
-  runIn(2, 'sendFoundSonosEvents', [data: [sessionId: sessionId]])
+Boolean hasQuickTopologyRequestInFlight() {
+  return !getQuickTopologyRequests().isEmpty()
 }
 
-
-/** Use one already-known speaker to discover the rest of the Sonos topology. */
+/** Ask one known or supplied speaker for the whole household topology. */
 void requestQuickTopologyRefresh(String preferredIp = null) {
-  if(state[QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY]) { return }
+  if(hasQuickTopologyRequestInFlight()) { return }
   String speakerIp = preferredIp?.trim()
   if(!speakerIp) {
     Map known = discoveredSonoses.values().find { Object raw -> raw instanceof Map && ((Map)raw).deviceIp } as Map
@@ -2457,203 +2302,246 @@ void requestQuickTopologyRefresh(String preferredIp = null) {
   String requestId = UUID.randomUUID().toString()
   String service = 'urn:schemas-upnp-org:service:ZoneGroupTopology:1'
   String body = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetZoneGroupState xmlns:u=\"${service}\"></u:GetZoneGroupState></s:Body></s:Envelope>"
-  Map params = [uri: "http://${speakerIp}:1400/ZoneGroupTopology/Control",
+  Map params = [uri: "http://${speakerIp}:${HOST_UPNP_PORT}/ZoneGroupTopology/Control",
     headers: [SOAPAction: "${service}#GetZoneGroupState"],
     requestContentType: 'text/xml', contentType: 'text/xml', timeout: 5, body: body]
-  state[QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY] = requestId
+  Map requests = getQuickTopologyRequests()
+  requests[requestId] = speakerIp
+  state[QUICK_TOPOLOGY_REQUESTS_STATE_KEY] = requests
   try {
     logInfo("Querying discovery topology from ${speakerIp}")
     asynchttpPost('quickTopologyCallback', params,
         [requestId: requestId, sourceIp: speakerIp, sessionId: atomicState.discoverySessionId])
   } catch(Exception e) {
-    state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
+    finishQuickTopologyRequest(requestId)
     logWarn("Could not query Sonos topology from ${speakerIp}: ${e.message}")
+    runInMillis(1, 'startNextPendingDiscoveryCandidate', [overwrite: true])
   }
 }
 
-void requestQuickTopologyDuringDiscovery(String speakerIp) {
-  if(atomicState[DISCOVERY_RUNNING_KEY] != true || atomicState[QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY] == true) { return }
-  atomicState[QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY] = true
-  requestQuickTopologyRefresh(speakerIp)
+void finishQuickTopologyRequest(String requestId) {
+  Map requests = getQuickTopologyRequests()
+  requests.remove(requestId)
+  if(requests.isEmpty()) { state.remove(QUICK_TOPOLOGY_REQUESTS_STATE_KEY) } else { state[QUICK_TOPOLOGY_REQUESTS_STATE_KEY] = requests }
 }
 
 void quickTopologyCallback(AsyncResponse response, Map data) {
   String requestId = data?.requestId?.toString()
-  if(!requestId || requestId != state[QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY]?.toString() ||
+  if(!requestId || !getQuickTopologyRequests().containsKey(requestId) ||
       data?.sessionId?.toString() != atomicState.discoverySessionId?.toString()) { return }
-  if(response == null || response.hasError()) {
-    state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
-    logWarn("Sonos topology query failed from ${data?.sourceIp}: status=${response?.status}, error=${response?.getErrorMessage()}")
-    return
-  }
+  finishQuickTopologyRequest(requestId)
   try {
-    String body = response.getData()?.toString()
-    GPathResult envelope = new XmlSlurper().parseText(body)
-    GPathResult responseNode = findXmlDescendantByLocalName(envelope, 'GetZoneGroupStateResponse')
-    GPathResult topologyNode = findDirectXmlChild(responseNode, 'ZoneGroupState')
-    List<GPathResult> members = []
-    collectXmlDescendantsByLocalName(topologyNode, 'ZoneGroupMember', members)
-    if(members.isEmpty()) {
-      String nestedXml = topologyNode?.text()?.toString()
-      if(nestedXml) {
-        GPathResult topology = new XmlSlurper().parseText(nestedXml)
-        collectXmlDescendantsByLocalName(topology, 'ZoneGroupMember', members)
-      }
+    if(response == null || response.hasError()) {
+      logWarn("Sonos topology query failed from ${data?.sourceIp}: status=${response?.status}, error=${response?.getErrorMessage()}")
+      return
     }
-    LinkedHashMap<String, Map> devicesByIp = new LinkedHashMap<String, Map>()
+    try {
+      List<Map<String, Object>> members = parseTopologyResponse(response.getData()?.toString())
+      Map<String, Integer> counts = applyTopologyPlayers(members)
+      logInfo("Sonos topology listed ${members.size()} member(s); discovered ${counts.primaries} player(s) and ${counts.secondaries} secondary device(s)")
+      sendFoundSonosEvents([sessionId: atomicState.discoverySessionId])
+    } catch(Exception e) {
+      logWarn("Could not parse Sonos topology response: ${e.message}")
+    }
+  } finally {
+    startNextPendingDiscoveryCandidate()
+  }
+}
+
+/**
+ * Parse a GetZoneGroupState response into one map per member, satellite and stereo-pair partner. Every
+ * member is kept, including ones SAC does not support, so group and coordinator data stays complete.
+ */
+List<Map<String, Object>> parseTopologyResponse(String body) {
+  GPathResult envelope = new XmlSlurper().parseText(body)
+  GPathResult responseNode = findXmlDescendantByLocalName(envelope, 'GetZoneGroupStateResponse')
+  GPathResult stateNode = findDirectXmlChild(responseNode, 'ZoneGroupState')
+  List<GPathResult> groups = []
+  collectXmlDescendantsByLocalName(stateNode, 'ZoneGroup', groups)
+  if(groups.isEmpty()) {
+    String nestedXml = stateNode?.text()?.toString()
+    if(nestedXml) { collectXmlDescendantsByLocalName(new XmlSlurper().parseText(nestedXml), 'ZoneGroup', groups) }
+  }
+  List<Map<String, Object>> players = []
+  groups.each { GPathResult group ->
+    String groupId = xmlAttribute(group, 'ID')
+    String coordinatorId = xmlAttribute(group, 'Coordinator')
+    List<Map<String, Object>> groupPlayers = []
+    List<GPathResult> members = []
+    collectXmlDescendantsByLocalName(group, 'ZoneGroupMember', members)
     members.each { GPathResult member ->
-      addQuickTopologyDevice(devicesByIp, member, false, null)
-      String primaryId = xmlAttribute(member, 'UUID')
+      Map<String, Object> player = buildTopologyPlayer(member, groupId, coordinatorId)
+      if(player == null) { return }
+      groupPlayers << player
       List<GPathResult> satellites = []
       collectXmlDescendantsByLocalName(member, 'Satellite', satellites)
-      satellites.each { GPathResult satellite -> addQuickTopologyDevice(devicesByIp, satellite, true, primaryId) }
-    }
-    String sourceIp = data?.sourceIp?.toString()
-    List<String> pendingIps = new ArrayList<String>(devicesByIp.keySet())
-    if(pendingIps.isEmpty()) {
-      state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
-      return
-    }
-    state[QUICK_TOPOLOGY_BATCH_STATE_KEY] = [
-      requestId: requestId,
-      devicesByIp: devicesByIp,
-      pendingIps: pendingIps,
-      sessionId: data?.sessionId?.toString()
-    ]
-    pendingIps.each { String ip -> requestQuickTopologySpeakerInfo(ip, requestId) }
-    logInfo("Sonos topology query found ${devicesByIp.size()} speaker locations; gathering details before refreshing the page")
-  } catch(Exception e) {
-    state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
-    logWarn("Could not parse Sonos topology response: ${e.message}")
-  }
-}
-
-void addQuickTopologyDevice(Map<String, Map> devicesByIp, GPathResult deviceNode,
-    Boolean secondary, String primaryDeviceId) {
-  String ip = null
-  try { ip = new URI(xmlAttribute(deviceNode, 'Location')).host } catch(Exception ignored) { }
-  if(!ip) { return }
-  Map<String, String> topologyInfo = [:]
-  QUICK_TOPOLOGY_DEVICE_ATTRIBUTE_NAMES.each { String name ->
-    String value = xmlAttribute(deviceNode, name)
-    if(value != null) { topologyInfo[name] = value }
-  }
-  devicesByIp[ip] = [ipAddress: ip, secondary: secondary, primaryDeviceId: primaryDeviceId,
-    topologyInfo: topologyInfo]
-}
-
-void addQuickTopologyIp(Set<String> ips, String location) {
-  try {
-    String ip = location ? new URI(location).host : null
-    if(ip) { ips.add(ip) }
-  } catch(Exception ignored) { }
-}
-
-void requestQuickTopologySpeakerInfo(String ipAddress, String requestId) {
-  Boolean dispatched = requestSonosPlayerInfo(ipAddress, 'quickTopologySpeakerInfoCallback',
-      [ipAddress: ipAddress, requestId: requestId, sessionId: atomicState.discoverySessionId])
-  if(!dispatched) { completeQuickTopologySpeaker(ipAddress, requestId) }
-}
-
-void quickTopologySpeakerInfoCallback(AsyncResponse response, Map data) {
-  String ipAddress = data?.ipAddress?.toString()
-  String requestId = data?.requestId?.toString()
-  Map batch = state[QUICK_TOPOLOGY_BATCH_STATE_KEY] instanceof Map
-      ? (Map)state[QUICK_TOPOLOGY_BATCH_STATE_KEY] : [:]
-  if(!ipAddress || !requestId || batch.requestId?.toString() != requestId ||
-      data?.sessionId?.toString() != atomicState.discoverySessionId?.toString()) { return }
-  if(response == null || response.hasError()) {
-    completeQuickTopologySpeaker(ipAddress, requestId)
-    return
-  }
-  try {
-    Map playerInfo = response.getJson() as Map
-    if(!(playerInfo instanceof Map)) {
-      completeQuickTopologySpeaker(ipAddress, requestId)
-      return
-    }
-    Map<String, Map> devicesByIp = batch.devicesByIp instanceof Map ? (Map<String, Map>)batch.devicesByIp : [:]
-    Map topologyDevice = devicesByIp[ipAddress] ?: [:]
-    if(topologyDevice.secondary == true && topologyDevice.primaryDeviceId && playerInfo.device instanceof Map) {
-      Map playerDevice = (Map)playerInfo.device
-      if(!playerDevice.primaryDeviceId) {
-        playerDevice.primaryDeviceId = topologyDevice.primaryDeviceId
+      satellites.each { GPathResult satellite ->
+        Map<String, Object> satellitePlayer = buildTopologyPlayer(satellite, groupId, coordinatorId)
+        if(satellitePlayer == null) { return }
+        satellitePlayer.secondary = true
+        satellitePlayer.zoneKind = 'satellite'
+        satellitePlayer.primaryDeviceId = player.rincon
+        groupPlayers << satellitePlayer
       }
     }
-    Boolean dispatched = requestSonosDeviceDescription(ipAddress, new LinkedHashMap(playerInfo),
-        'quickTopologyDeviceDescriptionCallback', [ipAddress: ipAddress, requestId: requestId, sessionId: atomicState.discoverySessionId])
-    if(!dispatched) { completeQuickTopologySpeaker(ipAddress, requestId) }
-  } catch(Exception e) {
-    logDebug("Could not process topology player info from ${ipAddress}: ${e.message}")
-    completeQuickTopologySpeaker(ipAddress, requestId)
-  }
-}
-
-void quickTopologyDeviceDescriptionCallback(AsyncResponse response, Map data) {
-  String ipAddress = data?.ipAddress?.toString()
-  String requestId = data?.requestId?.toString()
-  Map batch = state[QUICK_TOPOLOGY_BATCH_STATE_KEY] instanceof Map
-      ? (Map)state[QUICK_TOPOLOGY_BATCH_STATE_KEY] : [:]
-  if(!ipAddress || !requestId || batch.requestId?.toString() != requestId ||
-      data?.sessionId?.toString() != atomicState.discoverySessionId?.toString()) { return }
-  if(response == null || response.hasError()) {
-    completeQuickTopologySpeaker(ipAddress, requestId)
-    return
-  }
-  try {
-    GPathResult description = new XmlSlurper().parseText(response.getData()?.toString())
-    Map<String, Map> devicesByIp = batch.devicesByIp instanceof Map ? (Map<String, Map>)batch.devicesByIp : [:]
-    Map topologyDevice = devicesByIp[ipAddress] ?: [:]
-    processSonosDeviceInfo(data.playerInfo as LinkedHashMap, description, ipAddress,
-        topologyDevice.topologyInfo instanceof Map ? (Map)topologyDevice.topologyInfo : [:], false)
-  } catch(Exception e) {
-    logDebug("Could not process topology device description from ${ipAddress}: ${e.message}")
-  }
-  completeQuickTopologySpeaker(ipAddress, requestId)
-}
-
-void completeQuickTopologySpeaker(String ipAddress, String requestId) {
-  Map batch = state[QUICK_TOPOLOGY_BATCH_STATE_KEY] instanceof Map
-      ? (Map)state[QUICK_TOPOLOGY_BATCH_STATE_KEY] : [:]
-  if(!requestId || batch.requestId?.toString() != requestId ||
-      batch.sessionId?.toString() != atomicState.discoverySessionId?.toString()) { return }
-  List<String> pendingIps = batch.pendingIps instanceof Collection
-      ? new ArrayList<String>((Collection<String>)batch.pendingIps) : []
-  pendingIps.remove(ipAddress)
-  if(!pendingIps.isEmpty()) {
-    batch.pendingIps = pendingIps
-    state[QUICK_TOPOLOGY_BATCH_STATE_KEY] = batch
-    return
-  }
-
-  applyQuickTopologyFallbackDevices(batch)
-  state.remove(QUICK_TOPOLOGY_BATCH_STATE_KEY)
-  state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
-  logInfo("Sonos topology speaker details complete; refreshing the player page once")
-  sendFoundSonosEvents([sessionId: atomicState.discoverySessionId])
-}
-
-void applyQuickTopologyFallbackDevices(Map batch) {
-  Map<String, Map> devicesByIp = batch.devicesByIp instanceof Map ? (Map<String, Map>)batch.devicesByIp : [:]
-  devicesByIp.each { String ipAddress, Map topologyDevice ->
-    Boolean secondary = topologyDevice.secondary == true
-    Map<String, String> topologyInfo = topologyDevice.topologyInfo instanceof Map
-        ? (Map<String, String>)topologyDevice.topologyInfo : [:]
-    String playerId = topologyInfo.UUID?.toString()
-    String primaryDeviceId = topologyDevice.primaryDeviceId?.toString()
-    Map target = secondary ? (Map)discoveredSonosSecondaries : (Map)discoveredSonoses
-    Boolean alreadyKnown = target.values().any { Object raw ->
-      raw instanceof Map && ((Map)raw).deviceIp?.toString() == ipAddress
+    // A stereo-pair partner is an invisible member that shares its channel map with the visible one.
+    groupPlayers.findAll { Map<String, Object> candidate -> candidate.secondary != true && candidate.invisible == true }.each { Map<String, Object> partner ->
+      String channelMap = partner.channelMapSet?.toString()
+      Map<String, Object> primary = channelMap ? groupPlayers.find { Map<String, Object> other ->
+        other.secondary != true && other.invisible != true && other.channelMapSet?.toString() == channelMap
+      } : null
+      partner.secondary = true
+      partner.zoneKind = 'stereoPair'
+      partner.primaryDeviceId = primary?.rincon
     }
-    if(alreadyKnown) { return }
-    String playerName = topologyInfo.ZoneName?.toString() ?: playerId ?: "Sonos speaker at ${ipAddress}"
-    Map fallback = [id: playerId ?: ipAddress, name: playerName,
-      primaryDeviceId: primaryDeviceId, modelName: topologyInfo.ModelName,
-      modelDisplayName: topologyInfo.ModelDisplayName, swGen: topologyInfo.SWGen,
-      capabilities: [], deviceIp: ipAddress,
-      topologyInfo: topologyInfo]
-    target[ipAddress] = new LinkedHashMap(fallback)
+    players.addAll(groupPlayers)
   }
+  return players
+}
+
+Map<String, Object> buildTopologyPlayer(GPathResult node, String groupId, String coordinatorId) {
+  String rincon = xmlAttribute(node, 'UUID')?.trim()
+  String ip = null
+  Integer locationPort = null
+  try {
+    URI location = new URI(xmlAttribute(node, 'Location'))
+    ip = location.host
+    locationPort = location.port > 0 ? location.port : null
+  } catch(Exception ignored) { }
+  if(!rincon || !ip) { return null }
+  Map<String, String> topologyInfo = [:]
+  QUICK_TOPOLOGY_DEVICE_ATTRIBUTE_NAMES.each { String name ->
+    String value = xmlAttribute(node, name)
+    if(value != null && !value.isEmpty()) { topologyInfo[name] = value }
+  }
+  Map<String, Object> parsed = parseRincon(rincon)
+  Map<String, Object> player = [rincon: rincon, mac: parsed?.mac, upnpPort: parsed?.upnpPort, ip: ip,
+    locationPort: locationPort, name: xmlAttribute(node, 'ZoneName'), swGen: xmlAttribute(node, 'SWGen'),
+    secondary: false, zoneKind: 'primary', primaryDeviceId: null, groupId: groupId, coordinatorId: coordinatorId,
+    invisible: xmlAttribute(node, 'Invisible') == '1',
+    channelMapSet: xmlAttribute(node, 'ChannelMapSet') ?: xmlAttribute(node, 'HTSatChanMapSet'),
+    topologyInfo: topologyInfo] as Map<String, Object>
+  return player
+}
+
+/** Turn parsed topology members into discovery entries, applying the supported-port policy. */
+Map<String, Integer> applyTopologyPlayers(List<Map<String, Object>> members) {
+  Integer primaries = 0
+  Integer secondaries = 0
+  members.each { Map<String, Object> player ->
+    String rincon = player.rincon?.toString()
+    String name = player.name?.toString() ?: rincon
+    if(player.upnpPort == null) {
+      logWarn("Ignoring Sonos topology member ${name} with unrecognized RINCON ${rincon}")
+      return
+    }
+    Integer upnpPort = player.upnpPort as Integer
+    if(!isSupportedUpnpPort(upnpPort)) {
+      logInfo("Skipping Sonos player ${name} (${rincon}): UPnP port ${upnpPort} is not supported yet; only ${SUPPORTED_UPNP_PORTS.sort().join(', ')} players are supported")
+      return
+    }
+    if(player.locationPort != null && player.locationPort != upnpPort) {
+      logDebug("Topology Location port ${player.locationPort} differs from the RINCON port ${upnpPort} for ${rincon}; using the RINCON port")
+    }
+    String mac = player.mac.toString()
+    String key = buildPlayerKey(mac, upnpPort)
+    Map<String, Object> entry = [id: rincon, name: name, deviceIp: player.ip, swGen: player.swGen,
+      hostId: buildHostRincon(mac), upnpPort: upnpPort, zoneKind: player.zoneKind, eventTransport: 'upnp',
+      groupId: player.groupId, coordinatorId: player.coordinatorId,
+      topologyInfo: new LinkedHashMap((Map)player.topologyInfo)] as Map<String, Object>
+    String modelName = ((Map)player.topologyInfo).ModelName
+    String modelDisplayName = ((Map)player.topologyInfo).ModelDisplayName
+    if(modelName) { entry.modelName = modelName }
+    if(modelDisplayName) { entry.modelDisplayName = modelDisplayName }
+    if(player.secondary == true) {
+      Map<String, Object> primary = parseRincon(player.primaryDeviceId?.toString())
+      if(primary == null || !isSupportedUpnpPort(primary.upnpPort as Integer)) {
+        logDebug("Skipping secondary ${name} (${rincon}); its primary ${player.primaryDeviceId} is missing or unsupported")
+        return
+      }
+      entry.primaryDeviceId = player.primaryDeviceId
+      if(!entry.modelDisplayName) { entry.modelDisplayName = player.zoneKind == 'stereoPair' ? 'Stereo pair' : name }
+      discoveredSonosSecondaries[key] = new LinkedHashMap(entry)
+      secondaries++
+      logInfo("Discovered secondary ${entry.modelDisplayName} (${rincon}) for primary ${player.primaryDeviceId}")
+      return
+    }
+    discoveredSonoses[key] = new LinkedHashMap(entry)
+    primaries++
+    logInfo("Discovered Sonos device: ${name} at ${player.ip}")
+  }
+  persistDiscoveredSonosSecondaries()
+  return [primaries: primaries, secondaries: secondaries]
+}
+
+// =============================================================================
+// Player creation
+// =============================================================================
+
+/**
+ * Household topology already holds everything a player needs to be created, so the request goes to the
+ * parent as soon as it is built. One request creates one player; the player reads its own capabilities and
+ * household once it is running.
+ */
+void queuePlayerCreation(String key) {
+  Object discovered = key ? discoveredSonoses[key] : null
+  if(!(discovered instanceof Map)) {
+    logWarn("Cannot create a speaker that is not in the current discovery results: ${key}")
+    state.playerRequestMessage = 'Speaker creation could not be queued.'
+    return
+  }
+  Map info = (Map)discovered
+  String rincon = info.id?.toString()
+  Map<String, Map> secondaries = [:]
+  discoveredSonosSecondaries.each { Object secondaryKey, Object raw ->
+    if(raw instanceof Map && ((Map)raw).primaryDeviceId?.toString() == rincon) { secondaries[secondaryKey.toString()] = (Map)raw }
+  }
+  Map request = [schemaVersion: 2, requestId: UUID.randomUUID().toString(), dni: key,
+      player: copyCandidateInfoMap([(key): info])[key], secondaries: copyCandidateInfoMap(secondaries)]
+  Map result = parent.submitPlayerProvisioningRequest(request) as Map
+  if(result?.accepted != true) {
+    state.playerRequestMessage = 'Speaker creation could not be queued.'
+    return
+  }
+  state.playerRequestMessage = 'Speaker creation has been queued.'
+  schedulePlayerTableRefresh([key], [])
+}
+
+/**
+ * The parent creates and removes player devices on its own schedule after accepting a request, and nothing
+ * else tells this app when it finished. Poll its snapshot until the expected devices appear (or disappear),
+ * then refresh the speaker table once.
+ */
+void schedulePlayerTableRefresh(List<String> expectedPresent, List<String> expectedAbsent) {
+  state[PENDING_PLAYER_TABLE_REFRESH_KEY] = [present: expectedPresent, absent: expectedAbsent, attempts: 0]
+  runIn(2, 'pollPlayerTableRefresh')
+}
+
+void pollPlayerTableRefresh() {
+  Object raw = state[PENDING_PLAYER_TABLE_REFRESH_KEY]
+  if(!(raw instanceof Map)) { return }
+  Map pending = (Map)raw
+  Set<String> installed = new HashSet<String>()
+  Boolean snapshotRead = false
+  try {
+    Map snapshot = parent.getProvisioningSnapshot() as Map ?: [:]
+    installed.addAll(((Map)(snapshot.players ?: [:])).keySet().collect { Object key -> key.toString() })
+    snapshotRead = true
+  } catch(Exception e) {
+    logDebug("Waiting for the parent player snapshot (${e.class.simpleName})")
+  }
+  // A failed read leaves `installed` empty, which would look like every removal had finished.
+  Boolean settled = snapshotRead && ((Collection)pending.present).every { Object dni -> installed.contains(dni.toString()) } &&
+      ((Collection)pending.absent).every { Object dni -> !installed.contains(dni.toString()) }
+  Integer attempts = (pending.attempts instanceof Number ? (Number)pending.attempts : 0).intValue() + 1
+  if(settled || attempts >= PLAYER_TABLE_REFRESH_MAX_ATTEMPTS) {
+    state.remove(PENDING_PLAYER_TABLE_REFRESH_KEY)
+    if(!settled) { logWarn('The parent did not report the requested player changes in time; refreshing the speaker table anyway') }
+    app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
+    return
+  }
+  state[PENDING_PLAYER_TABLE_REFRESH_KEY] = pending + [attempts: attempts]
+  runIn(2, 'pollPlayerTableRefresh')
 }
 
 String xmlLocalName(GPathResult node) {
@@ -2710,8 +2598,7 @@ String getFoundSonoses() {
   discoveredSonosSecondaries.each { Object key, Object value ->
     Map secondary = (Map)value
     String primaryId = secondary.primaryDeviceId?.toString()
-    String primaryDni = getDNIFromRincon(primaryId)
-    Map primary = primaryDni ? (Map)discoveredSonoses[primaryDni] : null
+    Map primary = discoveredSonoses.values().find { Object raw -> raw instanceof Map && ((Map)raw).id?.toString() == primaryId } as Map
     if(primary != null) { names.add("${primary.name} (${secondary.modelDisplayName ?: secondary.modelName ?: "Secondary"})".toString()) }
   }
   names.sort().each { String name -> foundDevices += "\n${name}" }

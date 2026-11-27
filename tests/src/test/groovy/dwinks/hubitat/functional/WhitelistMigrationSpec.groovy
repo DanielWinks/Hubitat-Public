@@ -131,7 +131,7 @@ class WhitelistMigrationSpec extends Specification {
 
     then:
     app.settings.containsKey('logLevel')
-    app.settings.containsKey('playerDevices')
+    !app.settings.containsKey('playerDevices')   // the retired player selection is pruned
     !app.settings.containsKey('orphanSettingFromOldVersion')
     !app.settings.containsKey('chimeBeforeTTS')
   }
@@ -144,7 +144,7 @@ class WhitelistMigrationSpec extends Specification {
      'enableAlarmSwitches', 'autoCheckUpdates', 'autoInstallUpdates', 'updateCheckFrequency',
      'autoInstallTime', 'autoInstallNextOccurrence', 'autoInstallDayOfWeek',
      'hubSecurityUsername', 'hubSecurityPassword',
-     'playerDevices', 'groupDevices', 'skipOrphanRemoval', 'descriptionTextEnable',
+     'groupDevices', 'skipOrphanRemoval', 'descriptionTextEnable',
      'newUiGroupName', 'newUiGroupCoordinator', 'newUiGroupFollowers'].each { String k ->
       app.settings[k] = 'value'
     }
@@ -153,7 +153,7 @@ class WhitelistMigrationSpec extends Specification {
     app.pruneOrphanedAppPersistence()
 
     then:
-    app.settings.size() == 24
+    app.settings.size() == 23
   }
 
   def "app prunes retired discovery state keys"() {
@@ -271,15 +271,15 @@ class WhitelistMigrationSpec extends Specification {
 
   def "player prunes sid-expiresFormatted via whitelist"() {
     given:
-    playerDriver.device.dataValues['sid1-expiresFormatted'] = 'formatted'
-    playerDriver.device.dataValues['sid1-expires'] = 'expires'
+    playerDriver.device.dataValues['avTransport-expiresFormatted'] = 'formatted'
+    playerDriver.device.dataValues['avTransport-expires'] = 'expires'
 
     when:
     playerDriver.pruneOrphanedDriverPersistence()
 
     then:
-    !playerDriver.device.dataValues.containsKey('sid1-expiresFormatted')
-    playerDriver.device.dataValues.containsKey('sid1-expires')
+    !playerDriver.device.dataValues.containsKey('avTransport-expiresFormatted')
+    playerDriver.device.dataValues.containsKey('avTransport-expires')
   }
 
   // ---------- Group Driver ----------

@@ -177,6 +177,12 @@ class SonosAppGroupDouble extends ChildDeviceWrapper {
   void applyAppHouseholdTopology(String json) { refreshedPlaybackUpdates << json }
 }
 
+/** An existing player device that records what the app tells the driver after changing its data. */
+class RecordingPlayerDevice extends dwinks.hubitat.stubs.MockDevice {
+  List<Boolean> provisioningCalls = []
+  void provisioningDataChanged(Boolean endpointChanged) { provisioningCalls << endpointChanged }
+}
+
 class SonosAdvancedAppSpec extends Specification {
 
   @Shared File appFile = new File('../Apps/SonosAdvancedApp.groovy')
@@ -3980,29 +3986,168 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.logs.any { String entry -> entry.contains('finished (DONE)') }
   }
 
-  def "stereo companion is the single same-model secondary, never a sub or surround"() {
+  def "stereo companion is the single stereo-pair secondary, never a sub or surround"() {
     expect:
-    appScript.selectStereoCompanionSecondary('Era 100', [[id: 'R', deviceIp: '10.0.0.2', modelName: 'Era 100']]).id == 'R'
-    appScript.selectStereoCompanionSecondary('Arc', [[id: 'S', deviceIp: '10.0.0.3', modelName: 'Sub Mini']]) == null
-    appScript.selectStereoCompanionSecondary('Arc', []) == null
-    appScript.selectStereoCompanionSecondary(null, [[id: 'R', deviceIp: '10.0.0.2', modelName: 'Era 100']]) == null
-    appScript.selectStereoCompanionSecondary('Era 100', [[id: 'R', deviceIp: '10.0.0.2', modelName: 'Era 100'],
-        [id: 'R2', deviceIp: '10.0.0.4', modelName: 'Era 100']]) == null
+    appScript.selectStereoCompanionSecondary([[id: 'R', deviceIp: '10.0.0.2', zoneKind: 'stereoPair']]).id == 'R'
+    appScript.selectStereoCompanionSecondary([[id: 'S', deviceIp: '10.0.0.3', zoneKind: 'satellite']]) == null
+    appScript.selectStereoCompanionSecondary([[id: 'S', deviceIp: '10.0.0.3', zoneKind: 'satellite'],
+        [id: 'R', deviceIp: '10.0.0.2', zoneKind: 'stereoPair']]).id == 'R'
+    appScript.selectStereoCompanionSecondary([]) == null
+    appScript.selectStereoCompanionSecondary(null) == null
+    appScript.selectStereoCompanionSecondary([[id: 'R', deviceIp: '10.0.0.2', zoneKind: 'stereoPair'],
+        [id: 'R2', deviceIp: '10.0.0.4', zoneKind: 'stereoPair']]) == null
   }
 
   def "player provisioning request is validated, queued, and deferred by the parent"() {
     given:
-    Map player = [id: 'RINCON_NEW', name: 'Bedroom', modelName: 'One', deviceIp: '192.168.1.12']
+    Map player = [id: 'RINCON_NEW', name: 'Bedroom', modelName: 'One', deviceIp: '192.168.1.12',
+      hostId: 'RINCON_NEW', upnpPort: 1400, zoneKind: 'primary', eventTransport: 'upnp', unexpected: 'dropped']
 
     when:
-    Map result = appScript.submitPlayerProvisioningRequest([schemaVersion: 1, requestId: 'request-1',
-      selected: ['AA:BB:CC:DD:EE:03'], players: ['AA:BB:CC:DD:EE:03': player], secondaries: [:]])
+    Map result = appScript.submitPlayerProvisioningRequest([schemaVersion: 2, requestId: 'request-1',
+      dni: 'AA:BB:CC:DD:EE:03', player: player, secondaries: [:]])
 
     then:
     result.accepted == true
     appScript.app.getChildDevice('AA:BB:CC:DD:EE:03') == null
-    appScript.state.pendingPlayerProvisioningRequests['request-1'].selected == ['AA:BB:CC:DD:EE:03']
+    appScript.state.pendingPlayerProvisioningRequests['request-1'].dni == 'AA:BB:CC:DD:EE:03'
+    appScript.state.pendingPlayerProvisioningRequests['request-1'].player.with {
+      hostId == 'RINCON_NEW' && upnpPort == 1400 && zoneKind == 'primary' && eventTransport == 'upnp' && !containsKey('unexpected')
+    }
     appScript.scheduled.any { List item -> item[1] == 'drainPlayerProvisioningRequests' }
+  }
+
+  def "a provisioning request names exactly one player in the current format"() {
+    given:
+    Map player = [id: 'RINCON_NEW', name: 'Bedroom', deviceIp: '192.168.1.12']
+
+    expect:
+    !appScript.submitPlayerProvisioningRequest([schemaVersion: 1, requestId: 'r', selected: ['A'], players: [A: player], secondaries: [:]]).accepted
+    !appScript.submitPlayerProvisioningRequest([schemaVersion: 2, requestId: 'r', dni: ['A', 'B'], player: player, secondaries: [:]]).accepted
+    !appScript.submitPlayerProvisioningRequest([schemaVersion: 2, requestId: 'r', dni: 'bad dni!', player: player, secondaries: [:]]).accepted
+    appScript.submitPlayerProvisioningRequest([schemaVersion: 2, requestId: 'r', dni: 'A', player: [name: 'x'], secondaries: [:]]).error == 'invalid_player_data'
+  }
+
+  def "queued provisioning requests are drained one player at a time"() {
+    given:
+    ['AA:01', 'AA:02', 'AA:03'].eachWithIndex { String dni, Integer index ->
+      appScript.submitPlayerProvisioningRequest([schemaVersion: 2, requestId: "r${index}".toString(), dni: dni,
+        player: [id: "RINCON_${index}".toString(), name: "P${index}".toString(), deviceIp: "192.168.1.${index + 10}".toString()], secondaries: [:]])
+
+    }
+    appScript.addedChildProperties.clear()
+
+    when:
+    appScript.drainPlayerProvisioningRequests()
+
+    then: 'only the first request ran, and the drain is rescheduled for the rest'
+    appScript.addedChildProperties.size() == 1
+    appScript.state.pendingPlayerProvisioningRequests.keySet() as List == ['r1', 'r2']
+    appScript.scheduled.any { List item -> item[1] == 'drainPlayerProvisioningRequests' }
+  }
+
+  def "a new player is created with all of its data so the driver initializes once with a usable address"() {
+    given:
+    Map player = [id: 'RINCON_542A1B67195401400', name: "Kids' Room", deviceIp: '192.168.1.34',
+      upnpPort: 1400, hostId: 'RINCON_542A1B67195401400', zoneKind: 'primary', eventTransport: 'upnp']
+    Map<String, Map> secondaries = [
+      '542A1B5EC37E': [id: 'RINCON_542A1B5EC37E01400', primaryDeviceId: 'RINCON_542A1B67195401400', deviceIp: '192.168.1.39', zoneKind: 'stereoPair'],
+      'F0F6C10B791A': [id: 'RINCON_F0F6C10B791A01400', primaryDeviceId: 'RINCON_OTHER01400', deviceIp: '192.168.1.149', zoneKind: 'satellite']]
+
+    when:
+    Boolean created = appScript.provisionPlayerDevice('542A1B671954', player, secondaries)
+
+    then:
+    created
+    Map props = appScript.addedChildProperties.last()
+    props.data.deviceIp == '192.168.1.34'
+    props.data.id == 'RINCON_542A1B67195401400'
+    props.data.hostId == 'RINCON_542A1B67195401400'
+    props.data.secondaryIds == 'RINCON_542A1B5EC37E01400'
+    props.data.secondaryDeviceIps == '192.168.1.39'
+    props.data.rightChannelId == 'RINCON_542A1B5EC37E01400'
+    props.data.rightChannelDeviceIp == '192.168.1.39'
+    appScript.app.getChildDevice('542A1B671954').dataValues.deviceIp == '192.168.1.34'
+    !appScript.scheduled.any { List item -> item[1] in ['runSecondaryConfiguration', 'retryProvisionedDeviceConfiguration'] }
+  }
+
+  def "a player without an id or address is not created"() {
+    when:
+    Boolean created = appScript.provisionPlayerDevice('542A1B671954', [name: 'Kids'], [:])
+
+    then:
+    !created
+    appScript.addedChildProperties.every { Map props -> props.label != 'Sonos Advanced - Kids' }
+    appScript.logs.any { String line -> line.startsWith('ERROR') && line.contains('missing id, deviceIp') }
+  }
+
+  def "saving an unchanged selection does not tell existing players to reconnect"() {
+    given:
+    RecordingPlayerDevice existing = new RecordingPlayerDevice(deviceNetworkId: '542A1B671954')
+    existing.dataValues.putAll(id: 'RINCON_542A1B67195401400', name: "Kids' Room", deviceIp: '192.168.1.34', upnpPort: '1400',
+      hostId: 'RINCON_542A1B67195401400', zoneKind: 'primary', eventTransport: 'upnp')
+    appScript.children << existing
+    Map player = [id: 'RINCON_542A1B67195401400', name: "Kids' Room", deviceIp: '192.168.1.34', upnpPort: 1400,
+      hostId: 'RINCON_542A1B67195401400', zoneKind: 'primary', eventTransport: 'upnp']
+
+    when:
+    appScript.provisionPlayerDevice('542A1B671954', player, [:])
+
+    then:
+    existing.provisioningCalls.isEmpty()
+  }
+
+  def "recording the default port on a player created by an older release does not reconnect it"() {
+    given:
+    RecordingPlayerDevice existing = new RecordingPlayerDevice(deviceNetworkId: '542A1B671954')
+    existing.dataValues.putAll(id: 'RINCON_542A1B67195401400', name: "Kids' Room", deviceIp: '192.168.1.34')
+    appScript.children << existing
+    Map player = [id: 'RINCON_542A1B67195401400', name: "Kids' Room", deviceIp: '192.168.1.34', upnpPort: 1400,
+      hostId: 'RINCON_542A1B67195401400', zoneKind: 'primary', eventTransport: 'upnp']
+
+    when:
+    appScript.provisionPlayerDevice('542A1B671954', player, [:])
+
+    then:
+    existing.dataValues.upnpPort == '1400'
+    existing.dataValues.hostId == 'RINCON_542A1B67195401400'
+    existing.provisioningCalls.isEmpty()
+  }
+
+  def "a changed speaker address reconnects the player and a changed companion only reconciles its children"() {
+    given:
+    RecordingPlayerDevice existing = new RecordingPlayerDevice(deviceNetworkId: '542A1B671954')
+    existing.dataValues.putAll(id: 'RINCON_542A1B67195401400', name: "Kids' Room", deviceIp: '192.168.1.34', upnpPort: '1400',
+      hostId: 'RINCON_542A1B67195401400', zoneKind: 'primary', eventTransport: 'upnp')
+    appScript.children << existing
+    Map player = [id: 'RINCON_542A1B67195401400', name: "Kids' Room", deviceIp: '192.168.1.34', upnpPort: 1400,
+      hostId: 'RINCON_542A1B67195401400', zoneKind: 'primary', eventTransport: 'upnp']
+    Map<String, Map> pair = ['542A1B5EC37E': [id: 'RINCON_542A1B5EC37E01400', primaryDeviceId: 'RINCON_542A1B67195401400',
+      deviceIp: '192.168.1.39', zoneKind: 'stereoPair']]
+
+    when: 'a stereo partner appears'
+    appScript.provisionPlayerDevice('542A1B671954', player, pair)
+
+    then:
+    existing.provisioningCalls == [false]
+    existing.dataValues.rightChannelId == 'RINCON_542A1B5EC37E01400'
+
+    when: 'the speaker moves to a new address'
+    existing.provisioningCalls.clear()
+    appScript.provisionPlayerDevice('542A1B671954', player + [deviceIp: '192.168.1.50'], pair)
+
+    then:
+    existing.provisioningCalls == [true]
+    existing.dataValues.deviceIp == '192.168.1.50'
+
+    when: 'the partner leaves'
+    existing.provisioningCalls.clear()
+    appScript.provisionPlayerDevice('542A1B671954', player + [deviceIp: '192.168.1.50'], [:])
+
+    then:
+    existing.provisioningCalls == [false]
+    existing.dataValues.rightChannelId == null
+    existing.dataValues.secondaryIds == null
   }
 
   def "player arrived and departed stubs log without persisting state"() {

@@ -552,7 +552,6 @@ preferences {
 ]))
 
 @Field static final Set<String> ACTIVE_APP_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
-  'playerDevices',
   'logLevel',
   'useOldUi',
   'maximumTtsRetention',
@@ -989,7 +988,6 @@ void appButtonHandler(String buttonName) {
 Map getLegacyDiscoveryState() {
   Object secondaries = state[LEGACY_DISCOVERY_SECONDARIES_STATE_KEY]
   return [secondaries: secondaries instanceof Map ? new LinkedHashMap((Map)secondaries) : [:],
-    playerDevices: settings.playerDevices instanceof Collection ? new ArrayList(settings.playerDevices) : settings.playerDevices,
     groupConfigurations: state.userGroups instanceof Map ? new LinkedHashMap((Map)state.userGroups) : [:]]
 }
 
@@ -1208,7 +1206,7 @@ Object getAppPreference(String key, Object defaultValue = null) {
 void acknowledgeLegacyDiscoveryState() {
   state.remove(LEGACY_DISCOVERY_SECONDARIES_STATE_KEY)
   state.remove('userGroups')
-  ['playerDevices', 'groupDevices', 'newGroupName', 'newGroupCoordinator',
+  ['groupDevices', 'newGroupName', 'newGroupCoordinator',
     'newGroupPlayers', 'editDeleteGroup'].each { String settingName ->
     try { app.removeSetting(settingName) } catch(Exception ignored) { }
     try { settings.remove(settingName) } catch(Exception ignored) { }
@@ -1401,37 +1399,29 @@ void recordGroupManagementResult(String requestId, Map result) {
   state[GROUP_MANAGEMENT_RESULTS_KEY] = results
 }
 
+/**
+ * Queue the creation of one player. A request names one player (its DNI and topology data) and the secondaries
+ * that belong to it; the app never creates more than one player per request.
+ */
 Map submitPlayerProvisioningRequest(Map request) {
-  if(request?.schemaVersion != 1 || !request.requestId || !(request.selected instanceof Collection) ||
-      !(request.players instanceof Map) || !(request.secondaries instanceof Map)) {
+  if(request?.schemaVersion != 2 || !request.requestId || !(request.dni instanceof CharSequence) ||
+      !(request.player instanceof Map) || !(request.secondaries instanceof Map)) {
     return [accepted: false, error: 'invalid_request']
   }
-  List<String> selected = ((Collection)request.selected).collect { Object value -> value?.toString() }
-      .findAll { String value -> value } .unique()
-  Map players = (Map)request.players
+  String dni = request.dni.toString()
   Map secondaries = (Map)request.secondaries
-  if(players.size() > 64 || secondaries.size() > 128 || request.requestId.toString().length() > 80) {
+  if(secondaries.size() > 16 || request.requestId.toString().length() > 80) {
     return [accepted: false, error: 'request_too_large']
   }
-  if(selected.isEmpty() || selected.size() > 64 ||
-      selected.any { String dni -> dni.length() > 128 || !(dni ==~ /[A-Za-z0-9:._-]+/) }) {
-    return [accepted: false, error: 'invalid_selection']
+  if(dni.length() > 128 || !(dni ==~ /[A-Za-z0-9:._-]+/)) { return [accepted: false, error: 'invalid_selection'] }
+  // A player is created from household topology alone. Capabilities and the household ID are read by the
+  // driver itself, and model fields are not stored on the device.
+  Set<String> allowedFields = ['id', 'name', 'deviceIp', 'hostId', 'upnpPort', 'zoneKind', 'eventTransport'] as Set<String>
+  Map<String, Object> player = detachProvisioningMap((Map)request.player, allowedFields)
+  if(!['id', 'deviceIp'].every { String key -> player[key] != null && player[key].toString().trim() }) {
+    return [accepted: false, error: 'invalid_player_data']
   }
-  Set<String> allowedFields = ['id', 'name', 'deviceIp', 'swGen', 'capabilities', 'modelName', 'householdId', 'topologyInfo'] as Set<String>
-  Map<String, Map> validatedPlayers = [:]
-  selected.each { String dni ->
-    Object raw = players[dni]
-    if(!(raw instanceof Map)) { return }
-    Map player = (Map)raw
-    List<String> required = ['id', 'deviceIp']
-    Map<String, Object> detachedPlayer = detachProvisioningMap(player, allowedFields)
-    if(required.every { String key -> detachedPlayer[key] != null && detachedPlayer[key].toString().trim() }) {
-      validatedPlayers[dni] = detachedPlayer
-    }
-  }
-  if(validatedPlayers.size() != selected.size()) { return [accepted: false, error: 'invalid_player_data'] }
-  Set<String> allowedSecondaryFields = ['id', 'primaryDeviceId', 'deviceIp', 'swGen', 'capabilities', 'modelName', 'modelDisplayName',
-      'householdId', 'topologyInfo'] as Set<String>
+  Set<String> allowedSecondaryFields = ['id', 'primaryDeviceId', 'deviceIp', 'hostId', 'upnpPort', 'zoneKind'] as Set<String>
   Map<String, Map> validatedSecondaries = [:]
   secondaries.each { Object key, Object raw ->
     if(key instanceof String && raw instanceof Map && ((Map)raw).id && ((Map)raw).primaryDeviceId) {
@@ -1446,7 +1436,7 @@ Map submitPlayerProvisioningRequest(Map request) {
     return [accepted: true, requestId: requestId]
   }
   if(queue.size() >= 8) { return [accepted: false, error: 'queue_full'] }
-  queue[requestId] = [selected: selected, players: validatedPlayers, secondaries: validatedSecondaries]
+  queue[requestId] = [dni: dni, player: player, secondaries: validatedSecondaries]
   state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY] = queue
   recordPlayerProvisioningStatus(requestId, 'queued')
   runIn(1, 'drainPlayerProvisioningRequests', [overwrite: false])
@@ -1545,9 +1535,8 @@ void drainPlayerProvisioningRequests() {
       refreshGroupDeviceCoordinators()
       runIn(1, 'subscribeToGroupCommandRequests')
     } else {
-      Integer created = createPlayerDevicesFromProvisioning((List<String>)request.selected,
-          (Map<String, Map>)request.players, (Map<String, Map>)request.secondaries)
-      runIn(3, 'finalizeProvisionedPlayerCreation', [data: [requestId: requestId, created: created]])
+      Boolean created = provisionPlayerDevice(request.dni.toString(), (Map)request.player, (Map<String, Map>)request.secondaries)
+      runIn(3, 'finalizeProvisionedPlayerCreation', [data: [requestId: requestId, created: created ? 1 : 0]])
     }
     recordPlayerProvisioningStatus(requestId, 'complete')
   } catch(Exception e) {
@@ -2477,84 +2466,108 @@ void finalizeProvisionedPlayerCreation(Map data) {
   runIn(1, 'subscribeToGroupCommandRequests')
 }
 
-Integer createPlayerDevicesFromProvisioning(List<String> selectedPlayerDevices,
-    Map<String, Map> playerInfoByDni, Map<String, Map> secondaryInfoByDni) {
-  Integer createdCount = 0
-  if(selectedPlayerDevices == null || selectedPlayerDevices.isEmpty()) { return createdCount }
-  selectedPlayerDevices.each { String dni ->
-    Map playerInfo = playerInfoByDni[dni]
-    if(!dni || !(playerInfo instanceof Map)) { return }
-    ChildDeviceWrapper cd = app.getChildDevice(dni)
-    if(cd == null) {
-      try {
-        cd = addChildDevice('dwinks', 'Sonos Advanced Player', dni,
-            [name: 'Sonos Advanced Player', label: "Sonos Advanced - ${playerInfo.name}"])
-        if(cd) { createdCount++ }
-      } catch(UnknownDeviceTypeException e) {
-        logError("Sonos Advanced Player driver not found: ${e.message}")
-      } catch(Exception e) {
-        logError("Failed to create device for ${dni}: ${e.message}")
-        cd = app.getChildDevice(dni)
-        if(cd) { createdCount++ }
-      }
-    }
-    if(!cd) { return }
-    playerInfo.each { Object key, Object value ->
-      if(key != null && value != null) { cd.updateDataValue(key.toString(), value.toString()) }
-    }
-    refreshPlayerAnnouncementPolicySnapshot(cd)
-    String rincon = playerInfo.id?.toString()
-    List<Map> secondaries = secondaryInfoByDni.values().findAll { Object raw ->
-      raw instanceof Map && ((Map)raw).primaryDeviceId?.toString() == rincon
-    } as List<Map>
-    List<String> ips = secondaries.collect { Map value -> value.deviceIp?.toString() }.findAll { String value -> value }
-    List<String> ids = secondaries.collect { Map value -> value.id?.toString() }.findAll { String value -> value }
-    if(ips && ids) {
-      cd.updateDataValue('secondaryDeviceIps', ips.join(','))
-      cd.updateDataValue('secondaryIds', ids.join(','))
-    }
-    Map stereoCompanion = selectStereoCompanionSecondary(playerInfo.modelName?.toString(), secondaries)
-    if(stereoCompanion != null) {
-      cd.updateDataValue('rightChannelId', stereoCompanion.id.toString())
-      cd.updateDataValue('rightChannelDeviceIp', stereoCompanion.deviceIp.toString())
-    } else {
-      cd.removeDataValue('rightChannelId')
-      cd.removeDataValue('rightChannelDeviceIp')
-    }
-    List<String> critical = ['id', 'deviceIp']
-    List<String> missing = critical.findAll { String key -> !cd.getDataValue(key)?.toString() }
-    if(missing) {
-      logWarn("Device ${cd.label} is missing critical data fields: ${missing.join(', ')}")
-      runIn(10, 'retryProvisionedDeviceConfiguration', [data: [dni: dni, playerInfo: playerInfo]])
-    } else {
-      runIn(1, 'runSecondaryConfiguration', [data: [dni: dni]])
-    }
-  }
-  refreshGroupDeviceCoordinators()
-  return createdCount
-}
+// Device data keys whose change means the player must reconnect to its speaker.
+@Field static final List<String> PLAYER_ENDPOINT_DATA_KEYS = ['id', 'deviceIp', 'upnpPort'].asImmutable()
+// Device data keys that describe the player's secondaries; a change only needs its child devices reconciled.
+@Field static final List<String> PLAYER_MEMBERSHIP_DATA_KEYS =
+    ['secondaryIds', 'secondaryDeviceIps', 'rightChannelId', 'rightChannelDeviceIp'].asImmutable()
 
-void retryProvisionedDeviceConfiguration(Map data) {
-  String dni = data?.dni?.toString()
-  ChildDeviceWrapper cd = dni ? app.getChildDevice(dni) : null
-  Map playerInfo = data?.playerInfo instanceof Map ? (Map)data.playerInfo : [:]
-  if(!cd || playerInfo.isEmpty()) { return }
+/**
+ * Everything the driver needs at its first initialization, as device data. Returns the values to set and the
+ * keys that must not exist (for example a stereo companion the speaker no longer has).
+ */
+Map buildPlayerDeviceData(Map playerInfo, Map<String, Map> secondaryInfoByDni) {
+  Map<String, String> values = [:]
   playerInfo.each { Object key, Object value ->
-    if(key != null && value != null && !cd.getDataValue(key.toString())) {
-      cd.updateDataValue(key.toString(), value.toString())
-    }
+    if(key != null && value != null) { values[key.toString()] = value.toString() }
   }
-  List<String> critical = ['id', 'deviceIp']
-  if(critical.every { String key -> cd.getDataValue(key)?.toString() }) {
-    runIn(1, 'runSecondaryConfiguration', [data: [dni: dni]])
+  String rincon = playerInfo.id?.toString()
+  List<Map> secondaries = secondaryInfoByDni.values().findAll { Object raw ->
+    raw instanceof Map && ((Map)raw).primaryDeviceId?.toString() == rincon
+  } as List<Map>
+  List<String> ips = secondaries.collect { Map value -> value.deviceIp?.toString() }.findAll { String value -> value }
+  List<String> ids = secondaries.collect { Map value -> value.id?.toString() }.findAll { String value -> value }
+  List<String> remove = []
+  if(ips && ids) {
+    values.secondaryDeviceIps = ips.join(',')
+    values.secondaryIds = ids.join(',')
+  } else {
+    remove.addAll(['secondaryDeviceIps', 'secondaryIds'])
   }
+  Map stereoCompanion = selectStereoCompanionSecondary(secondaries)
+  if(stereoCompanion != null) {
+    values.rightChannelId = stereoCompanion.id.toString()
+    values.rightChannelDeviceIp = stereoCompanion.deviceIp.toString()
+  } else {
+    remove.addAll(['rightChannelId', 'rightChannelDeviceIp'])
+  }
+  return [values: values, remove: remove]
 }
 
-void runSecondaryConfiguration(Map data) {
-  String dni = data?.dni
-  if(!dni) { return }
+/**
+ * Create one player, or bring an existing one up to date. Returns true when a new device was created. The hub
+ * runs the driver's initialization inside addChildDevice, which takes several seconds, so a request never
+ * holds more than one player.
+ */
+Boolean provisionPlayerDevice(String dni, Map playerInfo, Map<String, Map> secondaryInfoByDni) {
+  if(!dni || !(playerInfo instanceof Map)) { return false }
+  Map desired = buildPlayerDeviceData(playerInfo, secondaryInfoByDni)
+  Map<String, String> values = (Map<String, String>)desired.values
+  List<String> missing = ['id', 'deviceIp'].findAll { String key -> !values[key] }
+  if(missing) {
+    logError("Cannot provision ${dni}; missing ${missing.join(', ')}")
+    return false
+  }
+  Boolean created = false
   ChildDeviceWrapper cd = app.getChildDevice(dni)
-  if(cd) { cd.secondaryConfiguration() }
+  if(cd == null) {
+    try {
+      // The hub calls the driver's installed() before addChildDevice returns, and that initialization connects
+      // to the speaker and builds the player's child devices from its data. Supply all of it at creation.
+      cd = addChildDevice('dwinks', 'Sonos Advanced Player', dni,
+          [name: 'Sonos Advanced Player', label: "Sonos Advanced - ${playerInfo.name}", data: values])
+      created = cd != null
+    } catch(UnknownDeviceTypeException e) {
+      logError("Sonos Advanced Player driver not found: ${e.message}")
+    } catch(Exception e) {
+      logError("Failed to create device for ${dni}: ${e.message}")
+      cd = app.getChildDevice(dni)
+      created = cd != null
+    }
+  } else {
+    applyProvisionedPlayerData(cd, desired)
+  }
+  if(cd) { refreshPlayerAnnouncementPolicySnapshot(cd) }
+  refreshGroupDeviceCoordinators()
+  return created
+}
+
+/**
+ * Bring an existing player's data up to date. The driver is told only when something it acts on changed, so
+ * saving an unchanged selection does not reconnect any speaker.
+ */
+void applyProvisionedPlayerData(ChildDeviceWrapper cd, Map desired) {
+  Map<String, String> values = (Map<String, String>)desired.values
+  Set<String> changed = new LinkedHashSet<String>()
+  values.each { String key, String value ->
+    String current = cd.getDataValue(key)
+    if(current != value) {
+      cd.updateDataValue(key, value)
+      // Players created before the port was recorded are on 1400; recording it is not an address change.
+      if(!(key == 'upnpPort' && current == null && value == '1400')) { changed.add(key) }
+    }
+  }
+  ((List<String>)desired.remove).each { String key ->
+    if(cd.getDataValue(key) != null) {
+      cd.removeDataValue(key)
+      changed.add(key)
+    }
+  }
+  if(changed.any { String key -> PLAYER_ENDPOINT_DATA_KEYS.contains(key) }) {
+    cd.provisioningDataChanged(true)
+  } else if(changed.any { String key -> PLAYER_MEMBERSHIP_DATA_KEYS.contains(key) }) {
+    cd.provisioningDataChanged(false)
+  }
 }
 
 void removeOrphans() {
@@ -2569,15 +2582,15 @@ void removeOrphans() {
 
 
 /**
- * A stereo pair is two speakers of the same model; subs and surrounds are other models.
- * Returns the secondary that is the pair's right channel, or null when none (or ambiguous).
+ * Discovery tags each secondary from household topology: a stereo-pair partner is an invisible member
+ * sharing its primary's channel map, while subs and surrounds are satellites. Returns the single
+ * stereo-pair secondary (the pair's right channel), or null when none or ambiguous.
  */
 @CompileStatic
-static Map selectStereoCompanionSecondary(String primaryModelName, List<Map> secondaries) {
-  if(!primaryModelName || secondaries == null) { return null }
+static Map selectStereoCompanionSecondary(List<Map> secondaries) {
+  if(secondaries == null) { return null }
   List<Map> matches = secondaries.findAll { Map secondary ->
-    secondary?.get('modelName')?.toString() == primaryModelName &&
-        secondary.get('id') && secondary.get('deviceIp')
+    secondary?.get('zoneKind')?.toString() == 'stereoPair' && secondary.get('id') && secondary.get('deviceIp')
   }
   return matches.size() == 1 ? matches[0] : null
 }

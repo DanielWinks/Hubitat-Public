@@ -81,9 +81,14 @@ void configure() { /* Rendering reads stored state; nothing to schedule or subsc
 /** Replace the stored snapshot with the latest normalized records: [[id:, name:, imageUrl:], ...]. */
 void storeCatalogSnapshot(List<Map> records, String sourceDni = null) {
   List<Map> normalized = normalizeCatalogRecords(records)
+  if(sourceDni) { state[CATALOG_SOURCE_STATE_KEY] = sourceDni }
+  // Several loads can report the same catalog; storing an identical snapshot again changes nothing.
+  if(state[CATALOG_RECORDS_STATE_KEY] instanceof List && state[CATALOG_RECORDS_STATE_KEY] == normalized) {
+    logDebug("${PLURAL_LABEL} are unchanged; not stored again")
+    return
+  }
   state[CATALOG_RECORDS_STATE_KEY] = normalized
   state[CATALOG_UPDATED_AT_STATE_KEY] = now()
-  if(sourceDni) { state[CATALOG_SOURCE_STATE_KEY] = sourceDni }
   logDebug("Stored ${normalized.size()} ${PLURAL_LABEL.toLowerCase(Locale.ROOT)}")
 }
 

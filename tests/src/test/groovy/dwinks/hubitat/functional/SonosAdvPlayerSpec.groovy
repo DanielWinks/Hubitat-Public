@@ -6,6 +6,7 @@ import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.util.XmlSlurper
 import groovy.util.slurpersupport.GPathResult
+import hubitat.scheduling.AsyncResponse
 import java.io.ByteArrayInputStream
 import java.time.Instant
 import org.apache.commons.lang3.StringEscapeUtils
@@ -157,10 +158,68 @@ class SonosAdvPlayerSpec extends Specification {
     when:
     driver.settings.createFavoritesChildDevice = true
     driver.children << new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getFavoritesChildDNI())
-    driver.handleContentDirectoryPayload(event)
+    driver.handleContentDirectoryPayload(event.replace('R,2', 'R,3'))
 
     then:
     driver.asyncCalls*.cb == ['favoritesBrowseCallback']
+  }
+
+  def "the first ContentDirectory notification loads the catalogs instead of assuming an earlier browse covers it"() {
+    given:
+    driver.runtimeState.catalogRefreshOwner = true
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    String initial = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><FavoritesUpdateID>RINCON_TEST,103</FavoritesUpdateID></e:property>' +
+      '<e:property><SavedQueuesUpdateID>RINCON_TEST,33</SavedQueuesUpdateID></e:property></e:propertyset>'
+
+    when: 'the first notification arrives, whatever browse may have run just before it'
+    driver.handleContentDirectoryPayload(initial)
+
+    then: 'the token is recorded and both catalogs load again'
+    driver.asyncCalls*.cb.containsAll(['favoritesBrowseCallback', 'playlistsBrowseCallback'])
+    driver.runtimeState.favoritesUpdateToken == 'RINCON_TEST,103'
+    driver.runtimeState.playlistsUpdateToken == 'RINCON_TEST,33'
+
+    when: 'the same token repeats'
+    driver.asyncCalls.clear()
+    driver.handleContentDirectoryPayload(initial)
+
+    then:
+    driver.asyncCalls.isEmpty()
+  }
+
+  def "a repeated update token is not loaded again but a changed one is"() {
+    given:
+    driver.runtimeState.catalogRefreshOwner = true
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    String favorites = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><FavoritesUpdateID>RINCON_TEST,%s</FavoritesUpdateID></e:property></e:propertyset>'
+    driver.runtimeState.favoritesUpdateToken = 'RINCON_TEST,103'
+
+    when:
+    driver.handleContentDirectoryPayload(String.format(favorites, '103'))
+
+    then:
+    driver.asyncCalls.isEmpty()
+
+    when: 'the library really changed a moment after the load'
+    driver.handleContentDirectoryPayload(String.format(favorites, '104'))
+
+    then:
+    driver.asyncCalls*.cb == ['favoritesBrowseCallback']
+    driver.runtimeState.favoritesUpdateToken == 'RINCON_TEST,104'
+  }
+
+  def "an unchanged update token leaves a non-elected player's local catalog alone"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.runtimeState.catalogRefreshOwner = false
+    driver.runtimeState.favoritesUpdateToken = 'R,2'
+    seedUpnpFavorite('1')
+
+    when:
+    driver.handleContentDirectoryPayload('<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><FavoritesUpdateID>R,2</FavoritesUpdateID></e:property></e:propertyset>')
+
+    then:
+    !driver.getFavoritesMap().isEmpty()
   }
 
   def "catalog snapshots go straight to the parent and a failed call is only logged"() {
@@ -1174,6 +1233,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.state.clear()
     driver.binding.setVariable('atomicState', [:])
     driver.device.dataValues.clear()
+    // Notifications in these tests arrive on a current subscription's callback path.
+    ['avTransport', 'renderingControl', 'groupRenderingControl', 'htControl', 'zgt', 'contentDirectory', 'alarmClock'].each { String key ->
+      driver.getPendingSubscribeTokens().put(key, 'test-token')
+    }
     driver.device.currentValues.clear()
     driver.device.events.clear()
     driver.device.dataValues.id = 'RINCON_TEST'
@@ -1289,6 +1352,211 @@ class SonosAdvPlayerSpec extends Specification {
     websocketConnections.size() == 1
     websocketConnections[0].last() == 'wss://192.168.1.50:1443/websocket/api'
     !parentPlayerUpdates.any { Map event -> event.kind?.toString()?.startsWith('initialization') }
+  }
+
+  def "a new player is brought up in a single pass with no phased secondary configuration"() {
+    expect:
+    driver.respondsTo('secondaryConfiguration').isEmpty()
+    driver.respondsTo('secondaryConfigurationPhase4').isEmpty()
+    !driver.respondsTo('provisioningDataChanged', [Boolean] as Object[]).isEmpty()
+  }
+
+  def "initialization does not prune persisted values"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.device.dataValues.leftoverFromAnOldRelease = 'x'
+
+    when:
+    driver.initialize()
+
+    then:
+    driver.device.dataValues.leftoverFromAnOldRelease == 'x'
+  }
+
+  def "configure still prunes values left by older releases"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.device.dataValues.leftoverFromAnOldRelease = 'x'
+
+    when:
+    driver.configure()
+
+    then:
+    !driver.device.dataValues.containsKey('leftoverFromAnOldRelease')
+  }
+
+  def "a new player requests the ZGT election on its first and only initialization"() {
+    given:
+    List<String> actions = []
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.metaClass.queryDeviceHasBattery = { -> false }
+    driver.metaClass.getParent = { -> new Expando(playerAppRequest: { Map payload ->
+      actions << payload.action
+      true
+    }) }
+
+    when:
+    driver.initialize()
+
+    then:
+    actions.contains('requestZgtElection')
+    driver.device.dataValues.hasBattery == 'false'
+  }
+
+  def "a changed speaker address reconnects but changed secondaries only reconcile child devices"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    List<String> reconciled = []
+    driver.metaClass.reconcileChildDevices = { -> reconciled << 'reconcile' }
+
+    when:
+    driver.provisioningDataChanged(false)
+
+    then:
+    reconciled == ['reconcile']
+    websocketConnections.isEmpty()
+
+    when:
+    driver.provisioningDataChanged(true)
+
+    then:
+    websocketConnections.size() == 1
+  }
+
+  def "the current-state whitelist covers every attribute the driver declares or emits"() {
+    given:
+    String source = new File('../Drivers/Component/SonosAdvPlayer.groovy').text
+    Set<String> declared = (source =~ /(?m)^\s*attribute '([A-Za-z0-9]+)'/).collect { List match -> match[1].toString() } as Set
+    // Attributes that come from the declared capabilities (AudioVolume, MusicPlayer, SwitchLevel, MediaTransport).
+    declared.addAll(['volume', 'mute', 'level', 'status', 'trackData', 'trackDescription', 'transportStatus'])
+    Set<String> emitted = (source =~ /sendEvent\(name: '([A-Za-z0-9]+)'/).collect { List match -> match[1].toString() } as Set
+
+    expect: 'nothing the driver publishes is pruned as an orphan'
+    ((declared + emitted) - driver.ACTIVE_PLAYER_CURRENT_STATE_ATTRIBUTES).isEmpty()
+  }
+
+  def "a deliberate websocket close is not reported as a failure and arms no retry"() {
+    given:
+    driver.runtimeState.websocketStatus = 'open'
+
+    when:
+    driver.wsClose()
+    driver.webSocketStatus('status: closing')
+    driver.webSocketStatus('failure: Connection reset')
+
+    then:
+    !driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
+    !driver.logs.any { String line -> line.contains('WebSocket connection failed') }
+    driver.runtimeState.wsRetryCount == null
+
+    when: 'a later close that this driver did not ask for is a real failure'
+    driver.runtimeState.remove('websocketExpectedCloseUntil')
+    driver.webSocketStatus('status: closing')
+
+    then:
+    driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
+    driver.logs.any { String line -> line.contains('WebSocket connection failed') }
+  }
+
+  def "starting a new connection ends the deliberate-close window"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.runtimeState.websocketStatus = 'closed'
+    driver.runtimeState.websocketExpectedCloseUntil = driver.now() + 60000L
+
+    when:
+    driver.wsConnect()
+
+    then:
+    !driver.runtimeState.containsKey('websocketExpectedCloseUntil')
+  }
+
+  def "the player reads its capabilities and household itself after initialization"() {
+    given:
+    List<String> htSubscribes = []
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.metaClass.subscribeToHtControlEvents = { -> htSubscribes << 'subscribe' }
+
+    when:
+    driver.requestPlayerProfile(1)
+    Map call = driver.asyncCalls.find { Map candidate -> candidate.cb == 'playerProfileCallback' }
+    driver.playerProfileCallback(new AsyncResponse(status: 200, data: JsonOutput.toJson([
+      householdId: 'Sonos_HOUSE', playerId: 'RINCON_X',
+      device: [name: 'Arc', modelDisplayName: 'Arc', capabilities: ['PLAYBACK', 'HT_PLAYBACK', 'AUDIO_CLIP']]])), call.data as Map)
+
+    then:
+    call.params.uri == 'https://192.168.1.50:1443/api/v1/players/local/info'
+    driver.device.dataValues.capabilities == '[PLAYBACK, HT_PLAYBACK, AUDIO_CLIP]'
+    driver.device.dataValues.householdId == 'Sonos_HOUSE'
+    driver.device.dataValues.modelDisplayName == 'Arc'
+    driver.hasHTPlaybackCapability()
+    htSubscribes == ['subscribe']
+  }
+
+  def "a profile response or retry from before reinitialization changes nothing"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.requestPlayerProfile(1)
+    Map stale = driver.asyncCalls.find { Map candidate -> candidate.cb == 'playerProfileCallback' }.data as Map
+    driver.asyncCalls.clear()
+    driver.scheduled.clear()
+
+    when: 'the player is initialized again and its first request goes out'
+    driver.requestPlayerProfile(1)
+
+    and: 'the earlier request answers, then fails'
+    driver.playerProfileCallback(new AsyncResponse(status: 200, data: JsonOutput.toJson([
+      householdId: 'Sonos_OLD', device: [name: 'Arc', capabilities: ['PLAYBACK']]])), stale)
+    driver.playerProfileCallback(new AsyncResponse(status: 500, errorMessage: 'timeout'), stale)
+    driver.retryPlayerProfile([attempt: 2, initToken: stale.initToken])
+
+    then:
+    !driver.device.dataValues.containsKey('householdId')
+    !driver.scheduled.any { List job -> job[1] == 'retryPlayerProfile' }
+    driver.asyncCalls.size() == 1
+  }
+
+  def "initialization asks the player for its profile without waiting on it"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+
+    when:
+    driver.initialize()
+
+    then:
+    driver.asyncCalls.any { Map call -> call.cb == 'playerProfileCallback' }
+  }
+
+  def "a failed profile read retries and gives up with one warning"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+
+    when:
+    driver.runtimeState.profileInitToken = 'init-1'
+    driver.playerProfileCallback(new AsyncResponse(status: 500, errorMessage: 'timeout'), [attempt: 1, initToken: 'init-1'])
+
+    then:
+    driver.scheduled.any { List job -> job[1] == 'retryPlayerProfile' && (job[2].data.attempt == 2) && job[2].data.initToken == 'init-1' }
+    driver.logs.every { String line -> !line.startsWith('WARN') }
+
+    when:
+    driver.playerProfileCallback(new AsyncResponse(status: 500, errorMessage: 'timeout'), [attempt: 2, initToken: 'init-1'])
+    driver.playerProfileCallback(new AsyncResponse(status: 500, errorMessage: 'timeout'), [attempt: 3, initToken: 'init-1'])
+
+    then:
+    // The harness mirrors every driver log to its app logger, so compare the distinct messages.
+    driver.logs.findAll { String line -> line.startsWith('WARN') && line.contains('Could not read the player profile after 3 attempts') }
+      .collect { String line -> line.replaceFirst(/^WARN Test (Device|App): /, '') }.unique().size() == 1
+  }
+
+  def "a profile response without a household or capabilities is treated as a failure"() {
+    when:
+    driver.runtimeState.profileInitToken = 'init-1'
+    driver.playerProfileCallback(new AsyncResponse(status: 200, data: '{"device":{"name":"Arc"}}'), [attempt: 1, initToken: 'init-1'])
+
+    then:
+    driver.scheduled.any { List job -> job[1] == 'retryPlayerProfile' }
+    !driver.device.dataValues.containsKey('householdId')
   }
 
   def "duplicate open callback does not replay subscription setup"() {
@@ -1623,7 +1891,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "raw UPnP subscribe formats request and records SID expiry and renewal"() {
     when:
-    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
 
     then:
     rawConnections.size() == 1
@@ -1631,7 +1899,7 @@ class SonosAdvPlayerSpec extends Specification {
     rawRequests[0].contains('HOST: 192.168.1.50:1400')
     rawConnections[0].port == 1400
     rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1\r\n')
-    rawRequests[0].contains('CALLBACK: <http://192.168.1.4:39501/avt>')
+    rawRequests[0].contains("CALLBACK: <http://192.168.1.4:39501/avt/${driver.getPendingSubscribeTokens().get('avTransport')}>")
     rawRequests[0].contains('NT: upnp:event')
     rawRequests[0].contains('TIMEOUT: Second-3600')
     rawRequests[0].contains('Connection: close')
@@ -1642,10 +1910,315 @@ class SonosAdvPlayerSpec extends Specification {
     rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:test-subscription\r\nTIMEOUT: Second-1800\r\n\r\n')
 
     then:
-    driver.getSid('sid1') == 'uuid:test-subscription'
-    driver.device.dataValues['sid1-expires'] != null
+    driver.getSid('avTransport') == 'uuid:test-subscription'
+    driver.device.dataValues['avTransport-expires'] != null
     driver.scheduled.any { List row -> row[1] == 'resubscribeToAVTransport' }
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active == null
+  }
+
+  def "UPnP subscribe waits quietly for deviceIp instead of dialing an empty host"() {
+    given:
+    String savedIp = driver.device.dataValues.remove('deviceIp')
+    Integer connectionsBefore = rawConnections.size()
+    Integer logsBefore = driver.logs.size()
+
+    when:
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+
+    then: 'no socket was opened and nothing was logged above debug'
+    rawConnections.size() == connectionsBefore
+    driver.logs.drop(logsBefore).every { String line -> !line.startsWith('WARN') && !line.startsWith('ERROR') }
+    driver.logs.drop(logsBefore).any { String line -> line.contains('skipped; deviceIp is not set yet') }
+
+    and: 'the request is retried later like any other failed attempt'
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpAvTransport' }
+
+    cleanup:
+    driver.upnpRequestQueues.clear()
+    driver.device.dataValues.deviceIp = savedIp ?: '192.168.1.50'
+  }
+
+  def "every fresh SUBSCRIBE carries its own token in its callback path"() {
+    when:
+    driver.getPendingSubscribeTokens().clear()
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    String avtToken = driver.getPendingSubscribeTokens().get('avTransport')
+
+    then: 'a token was issued for the pending SUBSCRIBE and the callback path includes it'
+    avtToken ==~ /[0-9a-f]{12}/
+    rawRequests[0].contains("CALLBACK: <http://192.168.1.4:39501/avt/${avtToken}>")
+
+    when: 'another service subscribes in the same initialization'
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:avt\r\nTIMEOUT: Second-3600\r\n\r\n')
+    driver.upnpSubscribeGeneric('subscribeToMrRcEvents', 'renderingControl', '/mrc', 'callback', '/MediaRenderer/RenderingControl/Event')
+    String rcToken = driver.getPendingSubscribeTokens().get('renderingControl')
+
+    then:
+    rcToken != avtToken
+    rawRequests[1].contains("CALLBACK: <http://192.168.1.4:39501/mrc/${rcToken}>")
+
+    and: 'an accepted SUBSCRIBE stops its token from counting'
+    driver.getPendingSubscribeTokens().get('avTransport') == null
+  }
+
+  def "a replaced lease is told from its replacement even though the token was reused by a retry"() {
+    given:
+    driver.getPendingSubscribeTokens().clear()
+    String firstToken = driver.issueSubscribeToken('avTransport')
+    Map firstNotify = [:]
+    firstNotify.put("NOTIFY /avt/${firstToken} HTTP/1.1".toString(), '')
+    firstNotify.put('SID', 'uuid:avt-first')
+
+    when: 'the response was lost and the retry issues a new token for its own lease'
+    String retryToken = driver.issueSubscribeToken('avTransport')
+    driver.setSid('avTransport', 'uuid:avt-second')
+    Map secondNotify = [:]
+    secondNotify.put("NOTIFY /avt/${retryToken} HTTP/1.1".toString(), '')
+    secondNotify.put('SID', 'uuid:avt-second')
+
+    then: 'NOTIFYs from the first lease no longer pass, and the replacement does by SID'
+    firstToken != retryToken
+    !driver.acceptNotifySubscription('AVTransport', firstNotify)
+    driver.acceptNotifySubscription('AVTransport', secondNotify)
+  }
+
+  def "a NOTIFY is live when its SID is the stored one or its path carries the pending SUBSCRIBE's token"() {
+    given:
+    driver.getPendingSubscribeTokens().clear()
+    driver.getPendingSubscribeTokens().put('renderingControl', 'cur-token')
+    driver.setSid('avTransport', 'uuid:avt-live')
+
+    expect: 'the stored SID is enough, even on a legacy path with no token'
+    driver.acceptNotifySubscription('AVTransport', ['NOTIFY /avt HTTP/1.1': '', 'SID': 'uuid:avt-live'])
+
+    and: 'the pending token is enough before the SUBSCRIBE response has stored the SID'
+    driver.acceptNotifySubscription('RenderingControl', ['NOTIFY /mrc/cur-token HTTP/1.1': '', 'SID': 'uuid:not-stored-yet'])
+
+    and: 'a token pending for another service does not count'
+    !driver.acceptNotifySubscription('GroupRenderingControl', ['NOTIFY /mgrc/cur-token HTTP/1.1': '', 'SID': 'uuid:other'])
+
+    and: 'a service this player does not track is not filtered'
+    driver.acceptNotifySubscription('SomethingElse', ['NOTIFY /x HTTP/1.1': ''])
+  }
+
+  def "a NOTIFY from an orphaned subscription is dropped and released with an UNSUBSCRIBE for its SID"() {
+    given:
+    driver.getPendingSubscribeTokens().clear()
+    driver.getPendingSubscribeTokens().put('avTransport', 'cur-token')
+    driver.setSid('avTransport', 'uuid:avt-live')
+
+    when: 'a subscription from an earlier player instance keeps sending'
+    Boolean accepted = driver.acceptNotifySubscription('AVTransport', ['NOTIFY /avt/old-token HTTP/1.1': '', 'SID': 'uuid:avt-orphan'])
+
+    then:
+    !accepted
+    rawRequests.size() == 1
+    rawRequests[0].startsWith('UNSUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
+    rawRequests[0].contains('SID: uuid:avt-orphan')
+    !rawRequests[0].contains('uuid:avt-live')
+
+    when: 'it keeps sending'
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\n\r\n')
+    driver.acceptNotifySubscription('AVTransport', ['NOTIFY /avt/old-token HTTP/1.1': '', 'SID': 'uuid:avt-orphan'])
+
+    then: 'it is released only once, and the live subscription is untouched'
+    rawRequests.size() == 1
+    driver.getSid('avTransport') == 'uuid:avt-live'
+  }
+
+  def "a legacy-path NOTIFY with an unknown SID is an orphan and one with no SID is simply dropped"() {
+    given:
+    driver.getPendingSubscribeTokens().clear()
+    driver.getPendingSubscribeTokens().put('avTransport', 'cur-token')
+
+    expect:
+    !driver.acceptNotifySubscription('GroupRenderingControl', ['NOTIFY /mgrc HTTP/1.1': '', 'SID': 'uuid:grc-orphan'])
+    rawRequests.size() == 1
+    rawRequests[0].contains('UNSUBSCRIBE /MediaRenderer/GroupRenderingControl/Event')
+
+    and:
+    !driver.acceptNotifySubscription('AlarmClock', ['NOTIFY /alarmclock HTTP/1.1': ''])
+    rawRequests.size() == 1
+  }
+
+  def "an orphaned NOTIFY never reaches the service handlers"() {
+    given:
+    driver.getPendingSubscribeTokens().clear()
+    driver.getPendingSubscribeTokens().put('avTransport', 'cur-token')
+    String body = avtBody('<TransportState val="PLAYING"/>')
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['NOTIFY /avt/old-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'AVTransport', 'SID': 'uuid:avt-orphan', 'SEQ': '4'], body: body]
+    }
+    List<Map> received = []
+    driver.metaClass.getParent = { -> new Expando(putAvtEvents: { String dni, List<Map> events, Object epoch, Object sequence ->
+      received << events }) }
+
+    when:
+    driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt/old-token HTTP/1.1\r\nX-SONOS-SERVICETYPE: AVTransport\r\n\r\n' + body)
+
+    then:
+    received.isEmpty()
+    rawRequests.any { String request -> request.contains('UNSUBSCRIBE') && request.contains('uuid:avt-orphan') }
+  }
+
+  def "re-initializing releases every held subscription with the SID it held, then subscribes under a new token"() {
+    given:
+    Map<String, String> held = [avTransport: 'uuid:avt', renderingControl: 'uuid:rc', groupRenderingControl: 'uuid:grc', htControl: 'uuid:ht', zgt: 'uuid:zgt',
+      contentDirectory: 'uuid:cd', alarmClock: 'uuid:alarm']
+    held.each { String key, String sid -> driver.setSid(key, sid) }
+    driver.getPendingSubscribeTokens().put('avTransport', 'old-token')
+
+    when:
+    driver.clearPlayerSubscriptionsForInitialization()
+    for(Integer i = 0; i < held.size(); i++) {
+      rawConnections[i].options.inputReader.call('HTTP/1.1 200 OK\r\n\r\n')
+    }
+
+    then: 'each SID was released even though the stored SIDs were deleted before any request ran'
+    rawRequests.size() == 7
+    rawRequests.every { String request -> request.startsWith('UNSUBSCRIBE ') }
+    held.values().every { String sid -> rawRequests.any { String request -> request.contains("SID: ${sid}") } }
+    held.keySet().every { String key -> driver.getSid(key) == null }
+
+    and: 'later subscriptions are recognizable from the old ones'
+    driver.getPendingSubscribeTokens().isEmpty()
+    !driver.acceptNotifySubscription('AVTransport', ['NOTIFY /avt/old-token HTTP/1.1': '', 'SID': 'uuid:avt'])
+  }
+
+  def "removing a SID logs once, and only when there was one"() {
+    given:
+    driver.setSid('contentDirectory', 'uuid:cd')
+
+    when:
+    driver.clearPlayerSubscriptionsForInitialization()
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\n\r\n')
+    driver.deleteSid('contentDirectory')
+
+    then: 'the harness mirrors each driver log to its app logger, so compare distinct messages'
+    driver.logs.findAll { String line -> line.contains('Removing SID for contentDirectory') }
+      .collect { String line -> line.replaceFirst(/^DEBUG Test (Device|App): /, '') }.unique().size() == 1
+    !driver.logs.any { String line -> line.contains('Removing SID for zgt') }
+  }
+
+  def "an UNSUBSCRIBE that finds the SID already replaced leaves the replacement alone"() {
+    given:
+    driver.setSid('avTransport', 'uuid:old')
+
+    when:
+    driver.unsubscribeFromAVTransport()
+    driver.setSid('avTransport', 'uuid:replacement')
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\n\r\n')
+
+    then:
+    driver.getSid('avTransport') == 'uuid:replacement'
+  }
+
+  def "removing a player releases its subscriptions before it goes away"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.setSid('avTransport', 'uuid:avt')
+    driver.setSid('contentDirectory', 'uuid:cd')
+
+    when:
+    driver.uninstalled()
+
+    then:
+    rawRequests.size() == 2
+    rawRequests.any { String request -> request.startsWith('UNSUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1') && request.contains('SID: uuid:avt') && request.contains('HOST: 192.168.1.50:1400') }
+    rawRequests.any { String request -> request.startsWith('UNSUBSCRIBE /MediaServer/ContentDirectory/Event HTTP/1.1') && request.contains('SID: uuid:cd') }
+    rawConnections.every { Map connection -> connection.host == '192.168.1.50' && connection.port == 1400 }
+
+    cleanup:
+    driver.upnpRequestQueues.clear()
+  }
+
+  def "removing a player with no subscriptions or no address sends nothing and does not fail"() {
+    given:
+    driver.device.dataValues.deviceIp = ''
+    driver.setSid('avTransport', 'uuid:avt')
+
+    when:
+    driver.unsubscribeHeldSidsOnUninstall()
+
+    then:
+    noExceptionThrown()
+    rawRequests.isEmpty()
+
+    cleanup:
+    driver.upnpRequestQueues.clear()
+  }
+
+  def "a SID stays known when its device data write is lost"() {
+    given:
+    driver.setSid('renderingControl', 'uuid:rc')
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-renderingControl', Instant.now().getEpochSecond() + 7200L)
+
+    when: 'a concurrent execution overwrites the data the SID was mirrored to'
+    driver.device.dataValues.remove('renderingControl')
+
+    then:
+    driver.getSid('renderingControl') == 'uuid:rc'
+    driver.hasSid('renderingControl')
+    driver.subValid('renderingControl')
+  }
+
+  def "held SIDs are seeded from device data once and a deleted SID is not brought back"() {
+    given: 'a reload: nothing in memory, SIDs only in device data'
+    driver.device.dataValues.avTransport = 'uuid:avt'
+    driver.device.dataValues.zgtSub = 'uuid:zgt'
+    driver.device.dataValues.contentDirectorySubscriptionId = 'uuid:cd'
+
+    expect:
+    driver.getSid('avTransport') == 'uuid:avt'
+    driver.getSid('zgt') == 'uuid:zgt'
+    driver.getSid('contentDirectory') == 'uuid:cd'
+
+    when: 'the SID is released and a stale write puts the old value back in device data'
+    driver.deleteSid('avTransport')
+    driver.device.dataValues.avTransport = 'uuid:avt'
+
+    then:
+    driver.getSid('avTransport') == null
+  }
+
+  def "a renewal of a SID whose data write was lost renews it instead of subscribing again"() {
+    given:
+    driver.setSid('avTransport', 'uuid:avt')
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-avTransport', Instant.now().getEpochSecond() + 7200L)
+    driver.device.dataValues.remove('avTransport')
+
+    when:
+    driver.upnpResubscribeGeneric('resubscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+
+    then:
+    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
+    rawRequests[0].contains('SID: uuid:avt')
+    !rawRequests[0].contains('CALLBACK:')
+
+    when: 'the renewal succeeds'
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:avt\r\nTIMEOUT: Second-3600\r\n\r\n')
+
+    then: 'the mirror in device data is written again'
+    driver.device.dataValues.avTransport == 'uuid:avt'
+  }
+
+  def "removing a player releases subscriptions it holds only in memory"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.setSid('renderingControl', 'uuid:rc')
+    driver.setSid('groupRenderingControl', 'uuid:grc')
+    driver.setSid('zgt', 'uuid:zgt')
+    ['renderingControl', 'groupRenderingControl', 'zgtSub'].each { String key -> driver.device.dataValues.remove(key) }
+
+    when:
+    driver.uninstalled()
+
+    then:
+    rawRequests.size() == 3
+    ['uuid:rc', 'uuid:grc', 'uuid:zgt'].every { String sid -> rawRequests.any { String request -> request.contains("SID: ${sid}") } }
+
+    cleanup:
+    driver.upnpRequestQueues.clear()
   }
 
   def "live subscription remains valid for its granted lease and repeated subscribe is coalesced"() {
@@ -1674,6 +2247,71 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.device.dataValues.containsKey('zgt')
     !driver.device.dataValues.containsKey('zgt-expires')
     !driver.device.dataValues.containsKey('zgtSubExpiresEpoch')
+  }
+
+  def "subscription device data sync restores SIDs and expiries lost to concurrent writes"() {
+    given:
+    driver.updateSid('avTransport', [SID: 'uuid:avt-test'], 1800L)
+    driver.updateSid('zgt', [SID: 'uuid:zgt-test'], 1800L)
+    driver.device.dataValues.remove('avTransport')
+    driver.device.dataValues.remove('avTransport-expires')
+
+    when:
+    driver.syncSubscriptionDeviceData()
+
+    then:
+    driver.device.dataValues.avTransport == 'uuid:avt-test'
+    driver.device.dataValues['avTransport-expires'] != null
+    driver.device.dataValues.zgtSub == 'uuid:zgt-test'
+  }
+
+  def "subscription device data sync does not resurrect deleted subscriptions"() {
+    given:
+    driver.updateSid('avTransport', [SID: 'uuid:avt-test'], 1800L)
+    driver.deleteSid('avTransport')
+
+    when:
+    driver.syncSubscriptionDeviceData()
+
+    then:
+    !driver.device.dataValues.containsKey('avTransport')
+    !driver.device.dataValues.containsKey('avTransport-expires')
+  }
+
+  def "a lease stored under a legacy sid key moves to its descriptive key before the prune"() {
+    given:
+    driver.device.dataValues['sid1'] = 'uuid:legacy-avt'
+    driver.device.dataValues['sid1-expires'] = '2026-Nov-27 1:29:59 PM'
+    driver.device.dataValues['sid2'] = 'uuid:legacy-rc'
+    driver.device.dataValues['sid4'] = 'uuid:legacy-grc'
+    driver.device.dataValues['sid5'] = 'uuid:legacy-ht'
+
+    when:
+    driver.pruneOrphanedDriverPersistence()
+
+    then:
+    ['sid1', 'sid1-expires', 'sid2', 'sid4', 'sid5'].every { String key -> !driver.device.dataValues.containsKey(key) }
+    driver.device.dataValues.avTransport == 'uuid:legacy-avt'
+    driver.device.dataValues['avTransport-expires'] == '2026-Nov-27 1:29:59 PM'
+    driver.device.dataValues.renderingControl == 'uuid:legacy-rc'
+    driver.device.dataValues.groupRenderingControl == 'uuid:legacy-grc'
+    driver.device.dataValues.htControl == 'uuid:legacy-ht'
+
+    and: 'the held SID is recognized, so a live NOTIFY is not treated as an orphan'
+    driver.acceptNotifySubscription('AVTransport', ['NOTIFY /avt/e1d1b3206774 HTTP/1.1': '', 'SID': 'uuid:legacy-avt'])
+  }
+
+  def "a legacy key never overwrites a lease already stored under the descriptive key"() {
+    given:
+    driver.device.dataValues['sid1'] = 'uuid:legacy-avt'
+    driver.device.dataValues['avTransport'] = 'uuid:current-avt'
+
+    when:
+    driver.migrateLegacySubscriptionKeys()
+
+    then:
+    driver.device.dataValues.avTransport == 'uuid:current-avt'
+    !driver.device.dataValues.containsKey('sid1')
   }
 
   def "last ZGT event timestamp uses the grouped ZGT device data name"() {
@@ -1773,16 +2411,16 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "expired renewal accepts the replacement SID returned by a fresh subscribe"() {
     given:
-    driver.setSid('sid1', 'uuid:expired')
-    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-sid1', Instant.now().getEpochSecond() - 60L)
+    driver.setSid('avTransport', 'uuid:expired')
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-avTransport', Instant.now().getEpochSecond() - 60L)
 
     when:
-    driver.upnpResubscribeGeneric('resubscribeToAVTransport', 'sid1', '/avt', 'callback',
+    driver.upnpResubscribeGeneric('resubscribeToAVTransport', 'avTransport', '/avt', 'callback',
       '/MediaRenderer/AVTransport/Event')
 
     then:
     rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
-    rawRequests[0].contains('CALLBACK: <http://192.168.1.4:39501/avt>')
+    rawRequests[0].contains("CALLBACK: <http://192.168.1.4:39501/avt/${driver.getPendingSubscribeTokens().get('avTransport')}>")
     !rawRequests[0].contains('SID: uuid:expired')
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.expectedCurrentSid == 'uuid:expired'
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sid == null
@@ -1792,9 +2430,9 @@ class SonosAdvPlayerSpec extends Specification {
       'HTTP/1.1 200 OK\r\nSID: uuid:replacement\r\nTIMEOUT: Second-1800\r\n\r\n')
 
     then:
-    driver.getSid('sid1') == 'uuid:replacement'
-    driver.device.dataValues['sid1-expires'] != null
-    driver.subscriptionExpiryEpochs.get('SONOS-TEST-DNI-sid1') > Instant.now().getEpochSecond()
+    driver.getSid('avTransport') == 'uuid:replacement'
+    driver.device.dataValues['avTransport-expires'] != null
+    driver.subscriptionExpiryEpochs.get('SONOS-TEST-DNI-avTransport') > Instant.now().getEpochSecond()
     driver.scheduled.any { List row -> row[1] == 'resubscribeToAVTransport' }
     !driver.logs.any { String line -> line.contains('Ignoring UPnP SID update') }
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active == null
@@ -1802,16 +2440,16 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "late fresh subscribe retry cannot replace a newer SID owner"() {
     given:
-    driver.setSid('sid1', 'uuid:expired')
-    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-sid1', Instant.now().getEpochSecond() - 60L)
+    driver.setSid('avTransport', 'uuid:expired')
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-avTransport', Instant.now().getEpochSecond() - 60L)
 
     when:
-    driver.upnpResubscribeGeneric('resubscribeToAVTransport', 'sid1', '/avt', 'callback',
+    driver.upnpResubscribeGeneric('resubscribeToAVTransport', 'avTransport', '/avt', 'callback',
       '/MediaRenderer/AVTransport/Event')
     rawConnections[0].options.inputReader.call('HTTP/1.1 500 Failure\r\n\r\n')
-    driver.setSid('sid1', 'uuid:newer-owner')
-    Map retryData = driver.scheduled.find { List row -> row[1] == 'retryUpnpSid1' }[2].data as Map
-    driver.retryUpnpSid1(retryData)
+    driver.setSid('avTransport', 'uuid:newer-owner')
+    Map retryData = driver.scheduled.find { List row -> row[1] == 'retryUpnpAvTransport' }[2].data as Map
+    driver.retryUpnpAvTransport(retryData)
 
     then:
     rawRequests.size() == 2
@@ -1823,18 +2461,18 @@ class SonosAdvPlayerSpec extends Specification {
       'HTTP/1.1 200 OK\r\nSID: uuid:stale-response\r\nTIMEOUT: Second-1800\r\n\r\n')
 
     then:
-    driver.getSid('sid1') == 'uuid:newer-owner'
+    driver.getSid('avTransport') == 'uuid:newer-owner'
     driver.logs.any { String line -> line.contains('Ignoring UPnP SID update') }
     !driver.scheduled.any { List row -> row[1] == 'resubscribeToAVTransport' }
   }
 
   def "renewal uses captured SID and unsubscribe preserves a replacement SID"() {
     given:
-    driver.setSid('sid1', 'uuid:old')
-    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-sid1', Instant.now().getEpochSecond() + 7200L)
+    driver.setSid('avTransport', 'uuid:old')
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-avTransport', Instant.now().getEpochSecond() + 7200L)
 
     when:
-    driver.upnpResubscribeGeneric('renewAVTransportSubscription', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    driver.upnpResubscribeGeneric('renewAVTransportSubscription', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
 
     then:
     rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
@@ -1842,7 +2480,7 @@ class SonosAdvPlayerSpec extends Specification {
     !rawRequests[0].contains('CALLBACK:')
 
     when:
-    driver.upnpUnsubscribeGeneric('unsubscribeFromAVTransport', 'sid1', 'renewAVTransportSubscription', '/MediaRenderer/AVTransport/Event', 'callback')
+    driver.upnpUnsubscribeGeneric('unsubscribeFromAVTransport', 'avTransport', 'renewAVTransportSubscription', '/MediaRenderer/AVTransport/Event', 'callback')
 
     then:
     rawConnections.size() == 1
@@ -1857,24 +2495,24 @@ class SonosAdvPlayerSpec extends Specification {
     rawRequests[1].contains('SID: uuid:new')
 
     when:
-    driver.setSid('sid1', 'uuid:replacement')
+    driver.setSid('avTransport', 'uuid:replacement')
     rawConnections[1].options.inputReader.call('HTTP/1.1 200 OK\r\n\r\n')
 
     then:
-    driver.getSid('sid1') == 'uuid:replacement'
+    driver.getSid('avTransport') == 'uuid:replacement'
   }
 
   def "stale response and watchdog cannot complete the next request"() {
     when:
-    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
     Map firstQueue = driver.upnpRequestQueues.get('SONOS-TEST-DNI')
     String firstGuid = firstQueue.active.guid
-    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid2', '/mrc', 'callback', '/MediaRenderer/RenderingControl/Event')
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'renderingControl', '/mrc', 'callback', '/MediaRenderer/RenderingControl/Event')
     driver.upnpSubscriptionWatchdog([guid: firstGuid])
 
     then:
     rawConnections.size() == 2
-    firstQueue.active.sidKey == 'sid2'
+    firstQueue.active.sidKey == 'renderingControl'
 
     when:
     rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:stale\r\n\r\n')
@@ -1882,51 +2520,51 @@ class SonosAdvPlayerSpec extends Specification {
     driver.upnpSubscriptionWatchdog([guid: firstGuid])
 
     then:
-    firstQueue.active.sidKey == 'sid2'
-    driver.getSid('sid1') == null
-    driver.getSid('sid2') == null
+    firstQueue.active.sidKey == 'renderingControl'
+    driver.getSid('avTransport') == null
+    driver.getSid('renderingControl') == null
   }
 
   def "missing SID and HTTP failures retry only within the configured bound"() {
     when:
-    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
     rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nTIMEOUT: Second-3600\r\n\r\n')
 
     then:
-    driver.getSid('sid1') == null
-    driver.scheduled.any { List row -> row[1] == 'retryUpnpSid1' }
+    driver.getSid('avTransport') == null
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpAvTransport' }
 
     when:
-    Map retryOne = driver.scheduled.find { List row -> row[1] == 'retryUpnpSid1' }[2].data as Map
-    driver.retryUpnpSid1(retryOne)
+    Map retryOne = driver.scheduled.find { List row -> row[1] == 'retryUpnpAvTransport' }[2].data as Map
+    driver.retryUpnpAvTransport(retryOne)
     rawConnections[1].options.inputReader.call('HTTP/1.1 500 Failure\r\n\r\n')
-    Map retryTwo = driver.scheduled.findAll { List row -> row[1] == 'retryUpnpSid1' }.last()[2].data as Map
-    driver.retryUpnpSid1(retryTwo)
+    Map retryTwo = driver.scheduled.findAll { List row -> row[1] == 'retryUpnpAvTransport' }.last()[2].data as Map
+    driver.retryUpnpAvTransport(retryTwo)
     rawConnections[2].options.inputReader.call('HTTP/1.1 500 Failure\r\n\r\n')
 
     then:
     rawRequests.size() == 3
-    driver.scheduled.count { List row -> row[1] == 'retryUpnpSid1' } == 2
-    driver.scheduled.findAll { List row -> row[1] == 'retryUpnpSid1' }*.getAt(0) == [60, 120]
+    driver.scheduled.count { List row -> row[1] == 'retryUpnpAvTransport' } == 2
+    driver.scheduled.findAll { List row -> row[1] == 'retryUpnpAvTransport' }*.getAt(0) == [60, 120]
     driver.logs.any { String line -> line.contains('retry limit reached') }
   }
 
   def "permanent UPnP client rejection does not retry while transient statuses do"() {
     when:
-    driver.upnpSubscribeGeneric('subscribeToHtControlEvents', 'sid5', '/htcontrol', 'callback', '/HTControl/Event')
+    driver.upnpSubscribeGeneric('subscribeToHtControlEvents', 'htControl', '/htcontrol', 'callback', '/HTControl/Event')
     rawConnections[0].options.inputReader.call('HTTP/1.1 405 Method Not Allowed\r\nAllow: GET\r\n\r\n')
 
     then:
     rawRequests[0].startsWith('SUBSCRIBE /HTControl/Event HTTP/1.1')
-    !driver.scheduled.any { List row -> row[1] == 'retryUpnpSid5' }
+    !driver.scheduled.any { List row -> row[1] == 'retryUpnpHtControl' }
     driver.logs.any { String line -> line.contains('HTTP 405') && line.contains('not retrying') && line.contains('allow=GET') }
 
     when:
-    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
     rawConnections.last().options.inputReader.call('HTTP/1.1 503 Service Unavailable\r\n\r\n')
 
     then:
-    driver.scheduled.any { List row -> row[1] == 'retryUpnpSid1' && row[0] == driver.UPNP_RETRY_BASE_DELAY_SECONDS }
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpAvTransport' && row[0] == driver.UPNP_RETRY_BASE_DELAY_SECONDS }
   }
 
   def "HTControl subscription uses the service event URL accepted by Sonos"() {
@@ -1940,18 +2578,18 @@ class SonosAdvPlayerSpec extends Specification {
     rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:htcontrol\r\nTIMEOUT: Second-3600\r\n\r\n')
 
     then:
-    driver.getSid('sid5') == 'uuid:htcontrol'
-    !driver.scheduled.any { List row -> row[1] == 'retryUpnpSid5' }
+    driver.getSid('htControl') == 'uuid:htcontrol'
+    !driver.scheduled.any { List row -> row[1] == 'retryUpnpHtControl' }
     driver.scheduled.any { List row -> row[1] == 'resubscribeToHtControlEvents' }
   }
 
   def "scheduled retry callback accepts Hubitat LazyMap payloads"() {
     when:
-    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
     rawConnections[0].options.inputReader.call('HTTP/1.1 500 Failure\r\n\r\n')
-    Map scheduledRetry = driver.scheduled.find { List row -> row[1] == 'retryUpnpSid1' }[2].data as Map
+    Map scheduledRetry = driver.scheduled.find { List row -> row[1] == 'retryUpnpAvTransport' }[2].data as Map
     Map hubitatData = new JsonSlurper().parseText(JsonOutput.toJson(scheduledRetry)) as Map
-    driver.retryUpnpSid1(hubitatData)
+    driver.retryUpnpAvTransport(hubitatData)
 
     then:
     rawRequests.size() == 2
@@ -1965,32 +2603,32 @@ class SonosAdvPlayerSpec extends Specification {
     String oversizedGuid = null
 
     when:
-    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
     oversizedGuid = driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.guid
     rawConnections[0].options.inputReader.call('X' * 17000)
 
     then:
-    driver.getSid('sid1') == null
-    driver.scheduled.any { List row -> row[1] == 'retryUpnpSid1' }
+    driver.getSid('avTransport') == null
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpAvTransport' }
 
     when:
     driver.upnpSubscriptionWatchdog([guid: oversizedGuid])
-    driver.retryUpnpSid1(driver.scheduled.find { List row -> row[1] == 'retryUpnpSid1' }[2].data as Map)
+    driver.retryUpnpAvTransport(driver.scheduled.find { List row -> row[1] == 'retryUpnpAvTransport' }[2].data as Map)
     rawConnections[1].options.inputReader.call('malformed status\r\n\r\n')
 
     then:
-    driver.getSid('sid1') == null
-    driver.scheduled.any { List row -> row[1] == 'retryUpnpSid1' }
+    driver.getSid('avTransport') == null
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpAvTransport' }
   }
 
   def "EOF and connection errors are failures and never create a SID"() {
     when:
-    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
     rawConnections[0].options.inputReader.call(null)
 
     then:
-    driver.getSid('sid1') == null
-    driver.scheduled.any { List row -> row[1] == 'retryUpnpSid1' }
+    driver.getSid('avTransport') == null
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpAvTransport' }
 
     when:
     driver.binding.getVariable('interfaces').rawSocket = new Expando(
@@ -1998,41 +2636,41 @@ class SonosAdvPlayerSpec extends Specification {
       sendMessage: { String message -> rawRequests << message },
       close: { -> }
     )
-    driver.retryUpnpSid1(driver.scheduled.findAll { List row -> row[1] == 'retryUpnpSid1' }.last()[2].data as Map)
+    driver.retryUpnpAvTransport(driver.scheduled.findAll { List row -> row[1] == 'retryUpnpAvTransport' }.last()[2].data as Map)
 
     then:
-    driver.getSid('sid1') == null
+    driver.getSid('avTransport') == null
     rawRequests.size() == 1
-    driver.scheduled.count { List row -> row[1] == 'retryUpnpSid1' } == 2
+    driver.scheduled.count { List row -> row[1] == 'retryUpnpAvTransport' } == 2
   }
 
   def "reinitialization rejects callbacks from the previous queue generation"() {
     when:
-    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
     String priorGuid = driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.guid
     driver.invalidateUpnpRequestsForDevice()
-    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid2', '/mrc', 'callback', '/MediaRenderer/RenderingControl/Event')
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'renderingControl', '/mrc', 'callback', '/MediaRenderer/RenderingControl/Event')
     rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:prior\r\n\r\n')
     driver.upnpSubscriptionWatchdog([guid: priorGuid])
 
     then:
-    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'sid2'
-    driver.getSid('sid1') == null
-    driver.getSid('sid2') == null
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'renderingControl'
+    driver.getSid('avTransport') == null
+    driver.getSid('renderingControl') == null
   }
 
   def "legacy callbacks and old fallback methods cannot alter current queue ownership"() {
     when:
-    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
     String guid = driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.guid
-    driver.subscribeResubscribeGenericCallback('subscribeToAVTransport', 'resubscribeToAVTransport', 'sid1', 'AVTransport', null)
-    driver.upnpUnsubscribeCallbackGeneric('sid1', 'AVTransport', null)
-    driver.unlockSid1SubscribeMutexAfterTimeoutCallback()
+    driver.subscribeResubscribeGenericCallback('subscribeToAVTransport', 'resubscribeToAVTransport', 'avTransport', 'AVTransport', null)
+    driver.upnpUnsubscribeCallbackGeneric('avTransport', 'AVTransport', null)
+    driver.unlockAvTransportSubscribeMutexAfterTimeoutCallback()
     driver.socketStatus('receive error')
 
     then:
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.guid == guid
-    driver.getSid('sid1') == null
+    driver.getSid('avTransport') == null
     rawConnections.size() == 1
   }
 
@@ -2075,10 +2713,10 @@ class SonosAdvPlayerSpec extends Specification {
   def "coordinator AVT parse sends sendEvent-ready events straight to the parent and publishes nothing itself"() {
     given:
     String body = avtBody('<TransportState val="PLAYING"/>')
-    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt HTTP/1.1\r\n' +
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt/test-token HTTP/1.1\r\n' +
       'X-SONOS-SERVICETYPE: AVTransport\r\nSEQ: 1\r\n\r\n' + body
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['X-SONOS-SERVICETYPE': 'AVTransport', 'SEQ': '1'], body: body]
+      [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'AVTransport', 'SEQ': '1'], body: body]
     }
     List<Map> received = []
     driver.metaClass.getParent = { -> new Expando(putAvtEvents: { String dni, List<Map> events, Object epoch, Object sequence ->
@@ -2102,9 +2740,9 @@ class SonosAdvPlayerSpec extends Specification {
     String body = avtBody('<TransportState val="PLAYING"/><CurrentTrackURI val="x-rincon:RINCON_542A1B67195401400"/>' +
       '<CurrentTrackMetaData val=""/><AVTransportURI val="x-rincon:RINCON_542A1B67195401400"/>' +
       '<AVTransportURIMetaData val=""/>')
-    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt HTTP/1.1\r\nX-SONOS-SERVICETYPE: AVTransport\r\nSEQ: 1\r\n\r\n' + body
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt/test-token HTTP/1.1\r\nX-SONOS-SERVICETYPE: AVTransport\r\nSEQ: 1\r\n\r\n' + body
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['X-SONOS-SERVICETYPE': 'AVTransport', 'SEQ': '1'], body: body]
+      [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'AVTransport', 'SEQ': '1'], body: body]
     }
     List<List> requests = []
     driver.metaClass.getParent = { -> new Expando(
@@ -2255,10 +2893,10 @@ class SonosAdvPlayerSpec extends Specification {
       '</ZoneGroup></ZoneGroups>'
     String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
     String body = '<propertyset><property><ZoneGroupState>' + escapedState + '</ZoneGroupState></property></propertyset>'
-    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt HTTP/1.1\r\n' +
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt/test-token HTTP/1.1\r\n' +
       'X-SONOS-SERVICETYPE: ZoneGroupTopology\r\nSEQ: 0\r\nSID: uuid:zgt-test\r\n\r\n' + body
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['X-SONOS-SERVICETYPE': 'ZoneGroupTopology', 'SEQ': '0', 'SID': 'uuid:zgt-test', 'NT': 'upnp:event', 'NTS': 'upnp:propchange'], body: body]
+      [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'ZoneGroupTopology', 'SEQ': '0', 'SID': 'uuid:zgt-test', 'NT': 'upnp:event', 'NTS': 'upnp:propchange'], body: body]
     }
 
     when:
@@ -2278,10 +2916,10 @@ class SonosAdvPlayerSpec extends Specification {
       '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
     String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
     String body = '<propertyset><property><ZoneGroupState>' + escapedState + '</ZoneGroupState></property></propertyset>'
-    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt HTTP/1.1\r\n' +
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt/test-token HTTP/1.1\r\n' +
       'X-SONOS-SERVICETYPE: ZoneGroupTopology\r\nSEQ: 5\r\nSID: uuid:zgt-test\r\n\r\n' + body
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['X-SONOS-SERVICETYPE': 'ZoneGroupTopology', 'SEQ': '5', 'SID': 'uuid:zgt-test', 'NT': 'upnp:event', 'NTS': 'upnp:propchange'], body: body]
+      [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'ZoneGroupTopology', 'SEQ': '5', 'SID': 'uuid:zgt-test', 'NT': 'upnp:event', 'NTS': 'upnp:propchange'], body: body]
     }
 
     when:
@@ -2295,10 +2933,10 @@ class SonosAdvPlayerSpec extends Specification {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
     String body = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;TransportState val="PLAYING"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
-    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt HTTP/1.1\r\n' +
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt/test-token HTTP/1.1\r\n' +
       'X-SONOS-SERVICETYPE: AVTransport\r\nSEQ: 0\r\nSID: uuid:avt-test\r\n\r\n' + body
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['X-SONOS-SERVICETYPE': 'AVTransport', 'SEQ': '0', 'SID': 'uuid:avt-test', 'NT': 'upnp:event', 'NTS': 'upnp:propchange'], body: body]
+      [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'AVTransport', 'SEQ': '0', 'SID': 'uuid:avt-test', 'NT': 'upnp:event', 'NTS': 'upnp:propchange'], body: body]
     }
 
     when:
@@ -2461,9 +3099,9 @@ class SonosAdvPlayerSpec extends Specification {
       '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
     String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
     String body = '<propertyset><property><ZoneGroupState>' + escapedState + '</ZoneGroupState></property></propertyset>'
-    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt HTTP/1.1\r\nSEQ: 3\r\nSID: uuid:zgt-legacy\r\n\r\n' + body
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt/test-token HTTP/1.1\r\nSEQ: 3\r\nSID: uuid:zgt-legacy\r\n\r\n' + body
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['SEQ': '3', 'SID': 'uuid:zgt-legacy', 'NOTIFY /zgt HTTP/1.1': ''], body: body]
+      [headers: ['SEQ': '3', 'SID': 'uuid:zgt-legacy', 'NOTIFY /zgt/test-token HTTP/1.1': ''], body: body]
     }
 
     when:
@@ -2479,9 +3117,9 @@ class SonosAdvPlayerSpec extends Specification {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
     String body = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;TransportState val="PLAYING"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
-    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt HTTP/1.1\r\nSEQ: 3\r\nSID: uuid:avt-legacy\r\n\r\n' + body
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt/test-token HTTP/1.1\r\nSEQ: 3\r\nSID: uuid:avt-legacy\r\n\r\n' + body
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['SEQ': '3', 'SID': 'uuid:avt-legacy', 'NOTIFY /avt HTTP/1.1': ''], body: body]
+      [headers: ['SEQ': '3', 'SID': 'uuid:avt-legacy', 'NOTIFY /avt/test-token HTTP/1.1': ''], body: body]
     }
 
     when:
@@ -2647,12 +3285,12 @@ class SonosAdvPlayerSpec extends Specification {
       '<property><AvailableSoftwareUpdate>0</AvailableSoftwareUpdate></property>' +
       '<property><ZoneGroupName>Household</ZoneGroupName><ZoneGroupState>' + escapedState +
       '</ZoneGroupState></property></propertyset>'
-    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt HTTP/1.1\r\n' +
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt/test-token HTTP/1.1\r\n' +
       'X-SONOS-SERVICETYPE: ZoneGroupTopology\r\n' +
       'SID: uuid:test-zgt\r\n' +
       'Content-Length: ' + body.getBytes('UTF-8').length + '\r\n\r\n' + body
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['X-SONOS-SERVICETYPE': 'ZoneGroupTopology'], body: body]
+      [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'ZoneGroupTopology'], body: body]
     }
 
     when:
@@ -2846,7 +3484,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     rawRequests[0].startsWith('SUBSCRIBE /AlarmClock/Event HTTP/1.1\r\n')
-    rawRequests[0].contains('CALLBACK: <http://192.168.1.4:39501/alarmclock>')
+    rawRequests[0].contains("CALLBACK: <http://192.168.1.4:39501/alarmclock/${driver.getPendingSubscribeTokens().get('alarmClock')}>")
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'alarmClock'
 
     when:
@@ -2907,11 +3545,11 @@ class SonosAdvPlayerSpec extends Specification {
       '<e:property><x:TimeZone xmlns:x="urn:test">01000a</x:TimeZone></e:property>' +
       '<e:property><Unrelated>ignored</Unrelated></e:property></e:propertyset>'
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['X-SONOS-SERVICETYPE': 'AlarmClock', 'SEQ': '0', 'SID': 'uuid:alarm-clock'], body: body]
+      [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'AlarmClock', 'SEQ': '0', 'SID': 'uuid:alarm-clock'], body: body]
     }
 
     when:
-    driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /alarmclock HTTP/1.1\r\n\r\n' + body)
+    driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /alarmclock/test-token HTTP/1.1\r\n\r\n' + body)
 
     then:
     parentPlayerUpdates.size() == 1
@@ -3578,23 +4216,23 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.scheduled.any { List job -> job[1] == 'watchExpectedUpnpSubscriptionEvents' }
   }
 
-  def "GroupRenderingControl subscription uses sid4 and renews on its own schedule"() {
+  def "GroupRenderingControl subscription uses groupRenderingControl and renews on its own schedule"() {
     when:
     driver.subscribeToMrGrcEvents()
 
     then:
     rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/GroupRenderingControl/Event HTTP/1.1\r\n')
-    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'sid4'
-    driver.defaultSubscribeMethod('sid4') == 'subscribeToMrGrcEvents'
-    driver.defaultResubscribeMethod('sid4') == 'resubscribeToMrGrcEvents'
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'groupRenderingControl'
+    driver.defaultSubscribeMethod('groupRenderingControl') == 'subscribeToMrGrcEvents'
+    driver.defaultResubscribeMethod('groupRenderingControl') == 'resubscribeToMrGrcEvents'
 
     when:
     rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:group-rendering\r\nTIMEOUT: Second-1800\r\n\r\n')
 
     then:
-    driver.getSid('sid4') == 'uuid:group-rendering'
-    driver.device.dataValues['sid4-expires'] != null
-    driver.subValid('sid4')
+    driver.getSid('groupRenderingControl') == 'uuid:group-rendering'
+    driver.device.dataValues['groupRenderingControl-expires'] != null
+    driver.subValid('groupRenderingControl')
     driver.scheduled.any { List row -> row[1] == 'resubscribeToMrGrcEvents' }
     driver.EVENT_TIMESTAMP_KEYS.contains('lastMrGrcEvent')
   }
@@ -3605,13 +4243,13 @@ class SonosAdvPlayerSpec extends Specification {
       '<GroupVolume val="40"/><GroupMute>1</GroupMute><GroupVolumeChangeable>1</GroupVolumeChangeable>' +
       '</e:property></e:propertyset>'
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['X-SONOS-SERVICETYPE': 'GroupRenderingControl'], body: body]
+      [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'GroupRenderingControl'], body: body]
     }
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
     captureParentAudioClipRequests()
 
     when:
-    driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /mgrc HTTP/1.1\r\n\r\n' + body)
+    driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /mgrc/test-token HTTP/1.1\r\n\r\n' + body)
 
     then:
     driver.scheduled.isEmpty()
@@ -3945,7 +4583,7 @@ class SonosAdvPlayerSpec extends Specification {
     String older = rcRaw('<Volume channel="Master" val="30"/>')
     String newer = rcRaw('<Volume channel="Master" val="35"/>')
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['X-SONOS-SERVICETYPE': 'RenderingControl'], body: rawMessage.substring(rawMessage.indexOf('<propertyset'))]
+      [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'RenderingControl'], body: rawMessage.substring(rawMessage.indexOf('<propertyset'))]
     }
 
     when: 'the notifications are observed in order, whatever order the app later receives them'
@@ -3969,7 +4607,7 @@ class SonosAdvPlayerSpec extends Specification {
       true
     }
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      [headers: ['X-SONOS-SERVICETYPE': 'RenderingControl'], body: rawMessage.substring(rawMessage.indexOf('<propertyset'))]
+      [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'RenderingControl'], body: rawMessage.substring(rawMessage.indexOf('<propertyset'))]
     }
 
     when:
@@ -3986,8 +4624,8 @@ class SonosAdvPlayerSpec extends Specification {
     String dni = driver.device.deviceNetworkId
     Long before = driver.PARENT_SEQUENCE_BY_DNI.get(dni) ?: 0L
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      rawMessage.contains('empty') ? [headers: ['X-SONOS-SERVICETYPE': 'RenderingControl'], body: ''] :
-        rawMessage.contains('unknown') ? [headers: ['X-SONOS-SERVICETYPE': 'Mystery'], body: '<x/>'] :
+      rawMessage.contains('empty') ? [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'RenderingControl'], body: ''] :
+        rawMessage.contains('unknown') ? [headers: ['NOTIFY /service/test-token HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'Mystery'], body: '<x/>'] :
         [headers: [:], body: '<x/>']
     }
 
@@ -4001,7 +4639,7 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   private String rcRaw(String innerXml) {
-    'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /rc HTTP/1.1\r\nX-SONOS-SERVICETYPE: RenderingControl\r\n\r\n' +
+    'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /rc/test-token HTTP/1.1\r\nX-SONOS-SERVICETYPE: RenderingControl\r\n\r\n' +
       '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(
       '<Event><InstanceID>' + innerXml + '</InstanceID></Event>') + '</LastChange></property></propertyset>'
   }

@@ -70,4 +70,33 @@ class SonosAdvancedCatalogAppsSpec extends Specification {
     'Favorites' | '../Apps/SonosAdvancedFavoritesApp.groovy'
     'Playlists' | '../Apps/SonosAdvancedPlaylistsApp.groovy'
   }
+
+  @Unroll
+  def '#plural child app does not store an identical snapshot again but keeps the source current'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(new File(file))
+    app.settings.logLevel = 'debug'
+    app.storeCatalogSnapshot([[id: '2', name: 'alpha', imageUrl: '']], 'PLAYER-1')
+    app.state.catalogUpdatedAt = 1000L
+
+    when: 'the same catalog is reported again, by another player'
+    app.storeCatalogSnapshot([[id: '2', name: 'alpha', imageUrl: '']], 'PLAYER-2')
+
+    then:
+    app.state.catalogUpdatedAt == 1000L
+    app.state.catalogSourceDni == 'PLAYER-2'
+    app.logs.any { String line -> line.contains("${plural} are unchanged") }
+
+    when: 'the catalog really changes'
+    app.storeCatalogSnapshot([[id: '2', name: 'alpha', imageUrl: ''], [id: '3', name: 'beta', imageUrl: '']], 'PLAYER-2')
+
+    then:
+    app.state.catalogRecords*.id == ['2', '3']
+    app.state.catalogUpdatedAt != 1000L
+
+    where:
+    plural      | file
+    'Favorites' | '../Apps/SonosAdvancedFavoritesApp.groovy'
+    'Playlists' | '../Apps/SonosAdvancedPlaylistsApp.groovy'
+  }
 }

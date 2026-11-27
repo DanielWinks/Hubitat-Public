@@ -16,7 +16,9 @@ import org.codehaus.groovy.control.SourceUnit
  * Catches things that are syntactically valid Groovy but rejected by the
  * Hubitat installation/runtime sandbox:
  *   - `package` declarations (Hubitat strips/rejects them)
- *   - direct `System.exit(...)`, `System.nanoTime()`, `Runtime.getRuntime()`, `Thread.start { }` etc.
+ *   - any call on `System` (`System.currentTimeMillis()`, `System.nanoTime()`, `System.exit(...)`,
+ *     `System.out.println(...)`): the hub rejects them at save time
+ *   - direct `Runtime.getRuntime()`, `Thread.start { }` etc.
  *   - `new File(...)` or any `java.io.File` use - the sandbox blocks the file system
  *   - reflection (`Class.forName`, `getClass().getMethod` etc.)
  *   - `eval`/`Eval`
@@ -27,12 +29,15 @@ class SandboxRule implements Rule {
 
   String getName() { 'Sandbox' }
 
+  /**
+   * Receivers on which every method call is rejected. The hub refuses calls on `System` at save time
+   * ("Expression [MethodCallExpression] is not allowed: java.lang.System.currentTimeMillis()"), not just the
+   * dangerous ones, so none are allowed. Use `now()`, `Instant.now()` or a UUID instead of a clock or counter.
+   */
+  static final Set<String> DISALLOWED_ANY_METHOD_RECEIVERS = (['System'] as Set)
+
   /** Disallowed receiver-method pairs. Receiver is matched by *simple* name or FQN. */
   static final Map<String, Set<String>> DISALLOWED_CALLS = [
-    // nanoTime is rejected by the hub at save time ("Expression [MethodCallExpression] is not allowed");
-    // use now() or a UUID instead. The others expose the host environment.
-    'System'      : (['exit', 'gc', 'load', 'loadLibrary', 'nanoTime', 'getenv', 'getProperty', 'getProperties',
-                      'setProperty'] as Set),
     'Runtime'     : (['getRuntime', 'exec'] as Set),
     'Class'       : (['forName'] as Set),
     'Thread'      : (['start', 'sleep'] as Set),
@@ -111,6 +116,12 @@ class SandboxRule implements Rule {
         // subscript can coerce an absent-key fallback map to the declared
         // Set value type for some parsed Hubitat scripts.
         String simpleReceiver = receiver.startsWith('java.lang.') ? receiver.substring('java.lang.'.length()) : receiver
+        // System.out.println and the like chase to 'System.out'; match on the leading receiver name.
+        String root = simpleReceiver.contains('.') ? simpleReceiver.substring(0, simpleReceiver.indexOf('.')) : simpleReceiver
+        if (DISALLOWED_ANY_METHOD_RECEIVERS.contains(root)) {
+          out << new Violation(file, call.lineNumber, call.columnNumber, ruleName, Severity.ERROR,
+            "Disallowed call '${simpleReceiver}.${mname}(...)' - the Hubitat sandbox rejects every call on '${root}'; use now(), Instant.now(), a UUID or the log helpers instead.")
+        }
         Set<String> blocked = DISALLOWED_CALLS.get(simpleReceiver)
         if (blocked != null && blocked.contains(mname)) {
           out << new Violation(file, call.lineNumber, call.columnNumber, ruleName, Severity.ERROR,

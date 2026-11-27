@@ -349,7 +349,7 @@ String getConfiguredLogLevel() {
   if(settings.logEnable == false) { return 'off' }
   if(settings.traceLogEnable == true) { return 'trace' }
   if(settings.debugLogEnable == true) { return 'debug' }
-  return 'info'
+  return 'trace' // TEMPORARY: diagnosing UPnP subscription refusals at player creation; restore to 'info'
 }
 
 String normalizeLogLevel(String level) {
@@ -888,7 +888,7 @@ metadata {
       input 'enableRawWebsocketLogging', 'bool', title: 'Enable raw WebSocket message logging (verbose, requires trace logging enabled)', required: false, defaultValue: false
     }
     section('Logging Settings') {
-      input name: 'logLevel', type: 'enum', title: 'Logging level', options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'], defaultValue: 'info', submitOnChange: true
+      input name: 'logLevel', type: 'enum', title: 'Logging level', options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'], defaultValue: 'trace', submitOnChange: true
     }
   }
 }
@@ -923,7 +923,8 @@ metadata {
   'groupTopologyOperationId', 'groupTopologyOperationRequestId', 'avtMatchKeys', 'pendingRandomMediaLoads',
   'websocketOpenedAt', 'lastAnnouncementPlaybackRestoreFailure', 'websocketConnectPending', 'wsDisconnectedSince',
   'wsRetryScheduled', 'transportCommandQueue', 'activeTransportCommand', 'transportStatusSnapshot',
-  'trackPositionSnapshot', 'announcementPlaybackSnapshot', 'websocketStatus', 'websocketShutdown'
+  'trackPositionSnapshot', 'announcementPlaybackSnapshot', 'websocketStatus', 'websocketShutdown',
+  'websocketExpectedCloseUntil'
 ].asImmutable()
 @Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
 @Field static final Integer WS_PING_INTERVAL_SECONDS = 15
@@ -944,6 +945,21 @@ metadata {
 @Field static final List<Integer> WS_BACKOFF_INTERVALS_SECONDS = [30, 60, 120, 300, 900, 1800, 3600]
 @Field static final String WS_STATUS_KEY = 'websocketStatus'
 @Field static final String WS_SHUTDOWN_KEY = 'websocketShutdown'
+// Set while a close this driver asked for is still reporting back, so its callbacks are not mistaken for a failure.
+// Every subscription carries this per-initialization token in its callback path (/avt/<token>), so a NOTIFY
+// can be told from one that belongs to a subscription this player no longer owns.
+// ContentDirectory reports an update token per catalog. The last one seen decides whether a notification is news,
+// and the time of the last load request tells an initial notification apart from a change.
+@Field static final String FAVORITES_UPDATE_TOKEN_KEY = 'favoritesUpdateToken'
+@Field static final String PLAYLISTS_UPDATE_TOKEN_KEY = 'playlistsUpdateToken'
+@Field static final List<String> UPNP_SUBSCRIPTION_KEYS = ['avTransport', 'renderingControl', 'zgt', 'groupRenderingControl', 'htControl', 'contentDirectory', 'alarmClock'].asImmutable()
+@Field static final String ORPHAN_UNSUBSCRIBED_RUNTIME_KEY = 'orphanUnsubscribedSids'
+@Field static final String HELD_SIDS_RUNTIME_KEY = 'heldSids'
+@Field static final String PROFILE_INIT_TOKEN_RUNTIME_KEY = 'profileInitToken'
+@Field static final String PENDING_SUBSCRIBE_TOKENS_RUNTIME_KEY = 'pendingSubscribeTokens'
+@Field static final Long ORPHAN_UNSUBSCRIBE_SUPPRESS_MILLIS = 600000L
+@Field static final String WS_EXPECTED_CLOSE_UNTIL_KEY = 'websocketExpectedCloseUntil'
+@Field static final Long WS_EXPECTED_CLOSE_WINDOW_MILLIS = 5000L
 // UPnP subscriptions share one per-player socket, so all service requests
 // pass through a single in-memory queue for this device.
 @Field static ConcurrentHashMap<String, Map> upnpRequestQueues = new ConcurrentHashMap<String, Map>()
@@ -1072,6 +1088,12 @@ metadata {
   'name',
   'capabilities',
   'householdId',
+  'modelDisplayName',
+  'websocketStatus',
+  'hostId',
+  'upnpPort',
+  'zoneKind',
+  'eventTransport',
   'hasBattery',
   'groupCoordinatorId',
   'groupId',
@@ -1086,17 +1108,17 @@ metadata {
   'runtimeStateMigrationVersion', // literal value of RUNTIME_MIGRATION_MARKER_KEY: Hubitat rejects constant refs in static Set initializers
   'normalAnnouncementMode',
   'highPriorityAnnouncementMode',
-  'sid1',
-  'sid2',
-  'sid4',
-  'sid5',
+  'avTransport',
+  'renderingControl',
+  'groupRenderingControl',
+  'htControl',
   'sid6',
   'contentDirectorySubscriptionId',
   'alarmClock',
-  'sid1-expires',
-  'sid2-expires',
-  'sid4-expires',
-  'sid5-expires',
+  'avTransport-expires',
+  'renderingControl-expires',
+  'groupRenderingControl-expires',
+  'htControl-expires',
   'sid6-expires',
   'contentDirectorySubscriptionExpires',
   'alarmClock-expires',
@@ -1153,6 +1175,13 @@ metadata {
   'status',
   'transportStatus',
   'audioSourceSignalStatus',
+  // Standard capability attributes (AudioVolume, MusicPlayer, SwitchLevel) and the HT control state.
+  'volume',
+  'mute',
+  'level',
+  'trackData',
+  'trackDescription',
+  'htControlTosLinkConnected',
 ]))
 
 @Field static final Set<String> ACTIVE_PLAYER_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
@@ -1189,6 +1218,8 @@ metadata {
 // Migration-Prune Helpers — whitelist-driven for-each removal
 // =============================================================================
 Map<String, Object> pruneOrphanedDriverPersistence() {
+  // The prune deletes legacy keys, so a lease stored under one has to be moved first.
+  migrateLegacySubscriptionKeys()
   Map<String, Object> result = [
     stateRemoved: pruneOrphanStateKeys(state as Map, ACTIVE_PLAYER_STATE_KEYS),
     atomicStateRemoved: pruneOrphanStateKeys(atomicState as Map, Collections.emptySet()),
@@ -1213,20 +1244,13 @@ List<String> pruneOrphanStateKeys(Map persisted, Set<String> active) {
   return toRemove
 }
 
-Boolean isActiveSidDataKey(String key) {
-  if(key == null) { return false }
-  if(key ==~ /^sid[12456]$/) { return true }
-  if(key ==~ /^sid[12456]-expires$/) { return true }
-  return false
-}
-
 List<String> pruneOrphanDeviceData(Object dev, Set<String> active) {
   if(dev == null || active == null) { return [] }
   try {
     Map data = dev.getData()
     if(data == null) { return [] }
     List<String> toRemove = new ArrayList<String>(data.keySet())
-      .findAll { String k -> !active.contains(k) && !isActiveSidDataKey(k) }
+      .findAll { String k -> !active.contains(k) }
     toRemove.each { String k -> dev.removeDataValue(k) }
     return toRemove
   } catch(Exception e) {
@@ -1280,8 +1304,44 @@ void uninstalled() {
   unschedule('watchTransportCommand')
   unschedule('retryUnconfirmedTransportCommand')
   unschedule('transportCommandDeadline')
+  unsubscribeHeldSidsOnUninstall()
   clearStaticDriverStateForCurrentDevice()
   shutdownWebSocket()
+}
+
+/**
+ * Release every subscription this player holds before it is deleted; otherwise the speaker keeps sending
+ * events for them until their lease runs out. This is best effort: the request queue is retired as the device
+ * goes away, so each UNSUBSCRIBE is a short send on its own connection that does not wait for a reply.
+ */
+void unsubscribeHeldSidsOnUninstall() {
+  try {
+    invalidateUpnpRequestsForDevice()
+    Map<String, String> held = [:]
+    UPNP_SUBSCRIPTION_KEYS.each { String key ->
+      String sid = getSid(key)
+      if(sid) { held[key] = sid }
+    }
+    if(held.isEmpty()) { return }
+    Map endpoint = getUpnpEndpoint()
+    String host = endpoint.host as String
+    String port = (endpoint.port ?: '1400').toString()
+    if(!host) { return }
+    logDebug("Releasing ${held.size()} UPnP subscription(s) before removal")
+    held.each { String key, String sid ->
+      try {
+        String message = "UNSUBSCRIBE ${upnpEventUrlForSidKey(key)} HTTP/1.1\r\nHOST: ${host}:${port}\r\nSID: ${sid}\r\nConnection: close\r\n\r\n"
+        interfaces.rawSocket.connect([timeout: 3000, inputReader: { InputStream input, Closure parseCallback -> input.read(new byte[256]) }], host, Integer.parseInt(port))
+        interfaces.rawSocket.sendMessage(message)
+        pauseExecution(100)
+        interfaces.rawSocket.close()
+      } catch(Exception e) {
+        logDebug("Could not release the ${key} subscription: ${e.message}")
+      }
+    }
+  } catch(Exception e) {
+    logDebug("Could not release UPnP subscriptions before removal: ${e.message}")
+  }
 }
 void installed() {
   initialize()
@@ -1294,6 +1354,100 @@ void updated() {
 
 void initialize() {
   performImmediateInitialization()
+}
+
+/**
+ * Called by the app after it changed this player's provisioned data. An address change reconnects the
+ * player; a change to its secondaries only reconciles its child devices.
+ */
+void provisioningDataChanged(Boolean endpointChanged) {
+  if(endpointChanged == true) { performImmediateInitialization() } else { reconcileChildDevices() }
+}
+
+// =============================================================================
+// Player profile: capabilities and household, read from the speaker's local API
+// =============================================================================
+@Field static final Integer PLAYER_PROFILE_MAX_ATTEMPTS = 3
+@Field static final Integer PLAYER_PROFILE_RETRY_SECONDS = 20
+
+/**
+ * The app creates a player from household topology alone, which has neither the player's capabilities nor
+ * its household ID. The player reads them itself, off the creation path, and finishes the capability-dependent
+ * setup when they arrive.
+ */
+void requestPlayerProfile(Integer attempt, String initToken = null) {
+  if(initToken == null) {
+    // A new initialization: responses and retries from an earlier one carry a different token and are dropped.
+    initToken = UUID.randomUUID().toString()
+    runtimeState[PROFILE_INIT_TOKEN_RUNTIME_KEY] = initToken
+  } else if(!isCurrentProfileInitToken(initToken)) {
+    logDebug('Dropping a player profile request from an earlier initialization')
+    return
+  }
+  String deviceIp = getDeviceIpForUrl()
+  if(!deviceIp) {
+    logDebug('Player profile request skipped; deviceIp is not set yet')
+    return
+  }
+  Map params = [uri: "https://${deviceIp}:1443/api/v1/players/local/info",
+    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
+    requestContentType: 'application/json', contentType: 'application/json', ignoreSSLIssues: true, timeout: 10]
+  try {
+    logDebug("Requesting player profile (attempt ${attempt})")
+    asynchttpGet('playerProfileCallback', params, [attempt: attempt, requestedAt: now(), initToken: initToken])
+  } catch(Exception e) {
+    logDebug("Could not dispatch the player profile request: ${e.message}")
+    schedulePlayerProfileRetry(attempt, initToken, "dispatch failed: ${e.message}")
+  }
+}
+
+Boolean isCurrentProfileInitToken(String initToken) {
+  return initToken != null && initToken == runtimeState[PROFILE_INIT_TOKEN_RUNTIME_KEY]?.toString()
+}
+
+void playerProfileCallback(AsyncResponse response, Map data) {
+  String initToken = data?.initToken?.toString()
+  if(!isCurrentProfileInitToken(initToken)) {
+    logDebug('Ignoring a player profile response from an earlier initialization')
+    return
+  }
+  Integer attempt = (data?.attempt ?: 1) as Integer
+  Long elapsed = data?.requestedAt != null ? now() - (data.requestedAt as Long) : null
+  if(response == null || response.hasError()) {
+    schedulePlayerProfileRetry(attempt, initToken, "status=${response?.status}, error=${response?.getErrorMessage()}")
+    return
+  }
+  try {
+    Map info = response.getJson() as Map
+    Map profileDevice = info?.device instanceof Map ? (Map)info.device : [:]
+    String householdId = info?.householdId?.toString()
+    if(!householdId || !(profileDevice.capabilities instanceof Collection)) {
+      schedulePlayerProfileRetry(attempt, initToken, 'the response had no household ID or capabilities')
+      return
+    }
+    Boolean hadHtPlayback = hasHTPlaybackCapability()
+    setDeviceDataValue('capabilities', new ArrayList((Collection)profileDevice.capabilities).toString())
+    setHouseholdId(householdId)
+    String modelDisplayName = profileDevice.modelDisplayName?.toString()
+    if(modelDisplayName) { setDeviceDataValue('modelDisplayName', modelDisplayName) }
+    logDebug("Player profile read in ${elapsed ?: 'unknown'} ms: capabilities=${profileDevice.capabilities}")
+    if(!hadHtPlayback && hasHTPlaybackCapability()) { subscribeToHtControlEvents() }
+  } catch(Exception e) {
+    schedulePlayerProfileRetry(attempt, initToken, "could not parse the response: ${e.message}")
+  }
+}
+
+void schedulePlayerProfileRetry(Integer attempt, String initToken, String reason) {
+  if(attempt >= PLAYER_PROFILE_MAX_ATTEMPTS) {
+    logWarn("Could not read the player profile after ${attempt} attempts (${reason}); capability-dependent features stay unavailable until the player is initialized again")
+    return
+  }
+  logDebug("Player profile attempt ${attempt} failed (${reason}); retrying in ${PLAYER_PROFILE_RETRY_SECONDS}s")
+  runIn(PLAYER_PROFILE_RETRY_SECONDS, 'retryPlayerProfile', [data: [attempt: attempt + 1, initToken: initToken], overwrite: true])
+}
+
+void retryPlayerProfile(Map data) {
+  requestPlayerProfile((data?.attempt ?: 1) as Integer, data?.initToken?.toString())
 }
 
 /** Only mains-powered players may own the household ZGT subscription. */
@@ -1348,8 +1502,15 @@ void clearLegacyBridgeAttributesForInitialization() {
   logDebug("Cleared stale bridge attributes for ${dni} before fresh initialization snapshot")
 }
 
+/**
+ * The one place a player is brought up: the app supplies the player's data when it creates the device, so
+ * installed() runs this once with a usable deviceIp. A later call (Initialize, or the app after the speaker's
+ * address changed) tears the connection down and brings it up again.
+ */
 void performImmediateInitialization() {
-  // Read battery eligibility before cacheBatteryCapability refreshes it, as the election always has.
+  // Eligibility comes from the previously cached battery value, as the election always has. A new device has
+  // none yet, so it is read again after the cache is filled below.
+  Boolean hadBatteryValue = device.getDataValue(HAS_BATTERY_DEVICE_KEY) != null
   Boolean zgtEligible = isZgtElectionEligible()
   if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
     try { wsClose() }
@@ -1361,8 +1522,8 @@ void performImmediateInitialization() {
   clearPendingCommandsForInitialization()
   clearPlayerSubscriptionsForInitialization()
   migrateLegacyRuntimeState()
-  pruneOrphanedDriverPersistence()
   cacheBatteryCapability()
+  if(!hadBatteryValue) { zgtEligible = isZgtElectionEligible() }
   clearLegacyBridgeAttributesForInitialization()
   reconcileChildDevices()
 
@@ -1385,6 +1546,7 @@ void performImmediateInitialization() {
   wsConnect()
   refreshUpnpMediaCatalogs()
   scheduleWebsocketHealthCheck()
+  requestPlayerProfile(1)
 }
 
 
@@ -1396,43 +1558,100 @@ void performImmediateInitialization() {
 void clearPlayerSubscriptionsForInitialization() {
   String dni = device.getDeviceNetworkId()
   if(!dni) { return }
-  String sid = getSid('zgt')
-  Boolean hadValid = subValid('zgt') || sid
-  Boolean hadGroupRenderingSubscription = subValid('sid4') || getSid('sid4') != null
   migrateLegacyContentDirectorySubscription()
-  Boolean hadContentDirectorySubscription = subValid(CONTENT_DIRECTORY_SUBSCRIPTION_KEY) || getSid(CONTENT_DIRECTORY_SUBSCRIPTION_KEY) != null
-  Boolean hadAlarmClockSubscription = subValid('alarmClock') || getSid('alarmClock') != null
+  migrateLegacySubscriptionKeys()
+  List<String> held = UPNP_SUBSCRIPTION_KEYS.findAll { String key -> subValid(key) || getSid(key) != null }
   invalidateUpnpRequestsForDevice()
-  if(hadAlarmClockSubscription) {
-    enqueueUpnpRequest('unsubscribe', 'unsubscribeFromAlarmClockEvents', 'resubscribeToAlarmClockEvents',
-        'alarmClock', null, ALARM_CLOCK_EVENTS_UNSUB_CALLBACK, ALARM_CLOCK_EVENTS)
-  }
-  if(hadContentDirectorySubscription) {
-    enqueueUpnpRequest('unsubscribe', 'unsubscribeFromContentDirectory', 'resubscribeToContentDirectory',
-        CONTENT_DIRECTORY_SUBSCRIPTION_KEY, null, CONTENT_DIRECTORY_UNSUB_CALLBACK, CONTENT_DIRECTORY_EVENTS)
-  }
-  if(hadGroupRenderingSubscription) {
-    enqueueUpnpRequest('unsubscribe', 'unsubscribeFromMrGrcEvents', 'resubscribeToMrGrcEvents',
-        'sid4', null, MRGRC_EVENTS_UNSUB_CALLBACK, MRGRC_EVENTS)
-  }
+  // Release every subscription this player holds. Each request captures its SID now, so the local deletes
+  // below cannot starve it.
+  held.each { String key -> enqueueUnsubscribeForHeldSid(key) }
+  // Forgetting the pending tokens makes any NOTIFY from the subscriptions being released recognizable as orphaned.
+  getPendingSubscribeTokens().clear()
   // Synchronous local delete after generation bump — stale callbacks are guarded by generation
-  deleteSid('zgt')
-  deleteSid('sid1')
-  deleteSid('sid2')
-  deleteSid('sid4')
-  deleteSid('sid5')
-  deleteSid(CONTENT_DIRECTORY_SUBSCRIPTION_KEY)
-  deleteSid('alarmClock')
-  device.removeDataValue('sid1-expires')
-  device.removeDataValue('sid2-expires')
-  device.removeDataValue('sid4-expires')
-  device.removeDataValue('sid5-expires')
+  UPNP_SUBSCRIPTION_KEYS.each { String key -> deleteSid(key) }
   device.removeDataValue(LEGACY_CONTENT_DIRECTORY_EXPIRES_DEVICE_KEY)
   device.removeDataValue(LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY)
-  device.removeDataValue('alarmClock-expires')
-  if(hadValid) {
-    enqueueUpnpRequest('unsubscribe', 'unsubscribeFromZgtEvents', 'resubscribeToZgtEvents', 'zgt', null, ZGT_EVENTS_UNSUB_CALLBACK, ZGT_EVENTS)
+}
+
+void enqueueUnsubscribeForHeldSid(String sidKey) {
+  switch(sidKey) {
+    case 'avTransport': unsubscribeFromAVTransport(); break
+    case 'renderingControl': unsubscribeFromMrRcEvents(); break
+    case 'groupRenderingControl': unsubscribeFromMrGrcEvents(); break
+    case 'htControl': unsubscribeFromHtControlEvents(); break
+    case 'zgt': unsubscribeFromZgtEvents(); break
+    case 'contentDirectory': unsubscribeFromContentDirectory(); break
+    case 'alarmClock': unsubscribeFromAlarmClockEvents(); break
+    default: break
   }
+}
+
+String newSubscriptionToken() {
+  return UUID.randomUUID().toString().replace('-', '').substring(0, 12)
+}
+
+ConcurrentHashMap<String, String> getPendingSubscribeTokens() {
+  return (ConcurrentHashMap<String, String>)runtimeState.computeIfAbsent(PENDING_SUBSCRIBE_TOKENS_RUNTIME_KEY) { String key -> new ConcurrentHashMap<String, String>() }
+}
+
+/**
+ * Every fresh SUBSCRIBE carries its own callback token, so a lease whose response was lost and that a retry
+ * replaced can be told from the replacement. The token only counts while its SID is still pending.
+ */
+String issueSubscribeToken(String sidKey) {
+  String token = newSubscriptionToken()
+  getPendingSubscribeTokens().put(sidKey, token)
+  return token
+}
+
+void clearPendingSubscribeToken(String sidKey) {
+  getPendingSubscribeTokens().remove(sidKey)
+}
+
+String upnpEventUrlForSidKey(String sidKey) {
+  return [avTransport: MRAVT_EVENTS, renderingControl: MRRC_EVENTS, groupRenderingControl: MRGRC_EVENTS, zgt: ZGT_EVENTS, htControl: HTCONTROL_EVENTS,
+    contentDirectory: CONTENT_DIRECTORY_EVENTS, alarmClock: ALARM_CLOCK_EVENTS][sidKey]
+}
+
+/** The token in the callback path of a NOTIFY request line ("NOTIFY /avt/<token> HTTP/1.1"), or null. */
+String notifyPathToken(Map headers) {
+  String requestLine = headers?.keySet()?.find { Object key -> key?.toString()?.startsWith('NOTIFY ') }?.toString()
+  if(!requestLine) { return null }
+  List<String> parts = requestLine.tokenize(' ')
+  if(parts.size() < 2) { return null }
+  List<String> segments = parts[1].tokenize('/')
+  return segments.size() >= 2 ? segments[1] : null
+}
+
+/**
+ * True when a NOTIFY belongs to a subscription this player holds: its SID is the stored one, or its callback
+ * path carries the token of the SUBSCRIBE still waiting for its response (which settles a NOTIFY that arrives
+ * before that response is processed). Anything else is an orphan left on the speaker by an earlier player or initialization; it is
+ * dropped and released with an UNSUBSCRIBE for its own SID.
+ */
+Boolean acceptNotifySubscription(String serviceType, Map headers) {
+  String sidKey = NOTIFY_SERVICE_SID_KEYS[serviceType]
+  if(sidKey == null) { return true }
+  String notifySid = headers['SID']?.toString()?.trim()
+  String storedSid = getSid(sidKey)
+  if(notifySid && storedSid && notifySid == storedSid) { return true }
+  String pathToken = notifyPathToken(headers)
+  String pendingToken = getPendingSubscribeTokens().get(sidKey)
+  if(pathToken && pendingToken && pathToken == pendingToken) { return true }
+  logDebug("Ignoring UPnP ${serviceType} NOTIFY from an orphaned subscription; sid=${notifySid ?: 'none'}, pathToken=${pathToken ?: 'none'}")
+  if(notifySid) { unsubscribeOrphanedSid(sidKey, notifySid) }
+  return false
+}
+
+void unsubscribeOrphanedSid(String sidKey, String sid) {
+  Long nowMillis = now()
+  ConcurrentHashMap<String, Long> seen = (ConcurrentHashMap<String, Long>)runtimeState.computeIfAbsent(ORPHAN_UNSUBSCRIBED_RUNTIME_KEY) { String key -> new ConcurrentHashMap<String, Long>() }
+  Long previous = seen.get(sid)
+  if(previous != null && nowMillis - previous < ORPHAN_UNSUBSCRIBE_SUPPRESS_MILLIS) { return }
+  if(seen.size() >= 64) { seen.clear() }
+  seen.put(sid, nowMillis)
+  logInfo("Releasing an orphaned ${sidKey} subscription (${sid}) left on the speaker by an earlier player")
+  enqueueUpnpRequest('unsubscribe', null, null, sidKey, null, null, upnpEventUrlForSidKey(sidKey), [orphanSid: sid])
 }
 
 /** Clear work owned by this player only at an explicit device initialization. */
@@ -1523,7 +1742,6 @@ void reconcileChildDevices() {
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
   // Re-initialize in-memory data structures (static fields cleared on JVM restart)
   // Guard: these methods use getId() as a ConcurrentHashMap key, which throws NPE if null.
-  // On fresh install, device data isn't set yet — secondaryConfigurationPhase4() will handle this.
   if(getId()) {
     groupsRegistryInitialization()
     favoritesMapInitialization()
@@ -1628,72 +1846,6 @@ void websocketHealthCheck() {
 }
 
 
-
-void secondaryConfiguration() {
-  // Validate critical device data before proceeding
-  List<String> criticalFields = ['id', 'deviceIp']
-  List<String> missingFields = []
-  criticalFields.each { field ->
-    String value = device.getDataValue(field)
-    if(!value || value == 'null') {
-      missingFields << field
-    }
-  }
-
-  if(missingFields.size() > 0) {
-    logWarn("Cannot complete secondaryConfiguration - missing critical data: ${missingFields.join(', ')}")
-    logWarn("This usually indicates the parent app hasn't finished configuring the device yet.")
-    // Schedule retry
-    runIn(10, 'secondaryConfiguration')
-    return
-  }
-
-  // Phase 1: First batch of child devices
-  createRemoveCrossfadeChildDevice(getCreateCrossfadeChildDevice())
-  createRemoveShuffleChildDevice(getCreateShuffleChildDevice())
-  createRemoveRepeatOneChildDevice(getCreateRepeatOneChildDevice())
-  runIn(1, 'secondaryConfigurationPhase2')
-}
-
-void secondaryConfigurationPhase2() {
-  // Phase 2: Second batch of child devices
-  createRemoveRepeatAllChildDevice(getCreateRepeatAllChildDevice())
-  createRemoveMuteChildDevice(getCreateMuteChildDevice())
-  createRemoveBatteryStatusChildDevice(getCreateBatteryStatusChildDevice())
-  runIn(1, 'secondaryConfigurationPhase3')
-}
-
-void secondaryConfigurationPhase3() {
-  // Phase 3: Third batch of child devices
-  createRemoveFavoritesChildDevice(getCreateFavoritesChildDevice())
-  createRemovePlaylistChildDevice(getCreatePlaylistChildDevice())
-  createRemoveQueueChildDevice(getCreateQueueChildDevice())
-  createRemoveSleepTimerChildDevice(getCreateSleepTimerChildDevice())
-  if(getCreateSleepTimerChildDevice()) { getSleepTimer() }
-  createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
-  runIn(1, 'secondaryConfigurationPhase4')
-}
-
-void secondaryConfigurationPhase4() {
-  // Phase 4: Final child devices, initialization, and subscription setup
-  createRemoveNightModeChildDevice(getCreateNightModeChildDevice())
-  createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
-  if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
-  if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
-  groupsRegistryInitialization()
-  favoritesMapInitialization()
-
-  // After device data is configured, establish this player’s UPnP subscriptions
-  // and WebSocket connection locally.
-  String localUpnpHost = getLocalUpnpHost()
-  String websocketUrl = getLocalWsUrl()
-
-  if(localUpnpHost && websocketUrl) {
-    performImmediateInitialization()
-  } else {
-    logWarn('Device data still incomplete after validation - subscriptions not established')
-  }
-}
 
 void migrationCleanup() {
   unschedule('resubscribeToGMEvents')
@@ -3922,6 +4074,7 @@ void parse(String raw) {
           "Could not determine service type for message: ${message}")
       return
     }
+    if(!acceptNotifySubscription(serviceType, messageHeaders)) { return }
     // Stamp once the notification is accepted (known service, headers and body present) but before any XML
     // parsing, so a stalled older notification can never receive a higher sequence than a newer one, and
     // ignored notifications do not burn sequence numbers.
@@ -3929,6 +4082,12 @@ void parse(String raw) {
     handleNotifyService(serviceType, xmlBody, notifyStamp)
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
 }
+
+/** Subscription key per UPnP service type, used to match a NOTIFY to the subscription that produced it. */
+@Field static final Map<String, String> NOTIFY_SERVICE_SID_KEYS = [
+  ZoneGroupTopology: 'zgt', AVTransport: 'avTransport', RenderingControl: 'renderingControl', GroupRenderingControl: 'groupRenderingControl',
+  HTControl: 'htControl', ContentDirectory: 'contentDirectory', AlarmClock: 'alarmClock'
+].asImmutable()
 
 /** Display label per UPnP service type handled by {@link #handleNotifyService}. */
 @Field static final Map<String, String> NOTIFY_SERVICE_LABELS = [
@@ -5069,6 +5228,27 @@ String subscriptionExpiryDataKey(String subscriptionKey) {
   if(subscriptionKey == CONTENT_DIRECTORY_SUBSCRIPTION_KEY) { return CONTENT_DIRECTORY_SUBSCRIPTION_EXPIRES_DEVICE_KEY }
   return "${subscriptionKey}-expires".toString()
 }
+// Device data keys used before the subscriptions got descriptive names. Read only for migration.
+@Field static final Map<String, String> LEGACY_SUBSCRIPTION_KEYS = [sid1: 'avTransport', sid2: 'renderingControl',
+  sid4: 'groupRenderingControl', sid5: 'htControl'].asImmutable()
+/**
+ * Move a lease held under a pre-rename key (sid1, sid2, sid4, sid5) onto its descriptive key, before the prune
+ * deletes it, so a live subscription keeps being recognized and released instead of being orphaned. The expiry
+ * is only informational: the lease is renewed because no in-memory expiry is known after an upgrade.
+ */
+void migrateLegacySubscriptionKeys() {
+  LEGACY_SUBSCRIPTION_KEYS.each { String legacyKey, String key ->
+    String legacySid = device.getDataValue(legacyKey)
+    String legacyExpiryKey = "${legacyKey}-expires".toString()
+    String legacyExpiry = device.getDataValue(legacyExpiryKey)
+    if(legacySid != null && device.getDataValue(subscriptionIdDataKey(key)) == null) {
+      setDeviceDataValue(subscriptionIdDataKey(key), legacySid)
+      if(legacyExpiry != null) { setDeviceDataValue(subscriptionExpiryDataKey(key), legacyExpiry) }
+    }
+    device.removeDataValue(legacyKey)
+    device.removeDataValue(legacyExpiryKey)
+  }
+}
 /** Move a pre-rename ContentDirectory SID onto the descriptive key so the normal unsubscribe path can release it. */
 void migrateLegacyContentDirectorySubscription() {
   String legacySid = device.getDataValue(LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY)
@@ -5078,22 +5258,74 @@ void migrateLegacyContentDirectorySubscription() {
   device.removeDataValue(LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY)
   device.removeDataValue(LEGACY_CONTENT_DIRECTORY_EXPIRES_DEVICE_KEY)
 }
+/**
+ * The SIDs this player holds, kept in memory for as long as the driver is loaded and seeded once from device data.
+ * Device data is only a mirror that survives a reload: concurrent executions on one player (an initialization that
+ * is still running while subscription callbacks arrive) can overwrite each other's data writes, and a SID lost that
+ * way would make a renewal subscribe again, leave the old subscription on the speaker and keep it from being released.
+ */
+ConcurrentHashMap<String, String> getHeldSids() {
+  Object held = runtimeState.get(HELD_SIDS_RUNTIME_KEY)
+  if(held != null) { return (ConcurrentHashMap<String, String>)held }
+  ConcurrentHashMap<String, String> seeded = new ConcurrentHashMap<String, String>()
+  migrateLegacyContentDirectorySubscription()
+  migrateLegacySubscriptionKeys()
+  UPNP_SUBSCRIPTION_KEYS.each { String key ->
+    String persisted = device.getDataValue(subscriptionIdDataKey(key))
+    if(persisted != null) { seeded.put(key, persisted) }
+  }
+  Object raced = runtimeState.putIfAbsent(HELD_SIDS_RUNTIME_KEY, seeded)
+  return (ConcurrentHashMap<String, String>)(raced != null ? raced : seeded)
+}
 String getSid(String sid) {
-  return device.getDataValue(subscriptionIdDataKey(sid))
+  return getHeldSids().get(sid)
 }
 void setSid(String sid, String value) {
+  getHeldSids().put(sid, value)
   setDeviceDataValue(subscriptionIdDataKey(sid), value)
 }
 void deleteSid(String sid) {
-  logDebug("Removing SID for ${sid}")
   String sidDataKey = subscriptionIdDataKey(sid)
   String expiryDataKey = subscriptionExpiryDataKey(sid)
+  Boolean held = getHeldSids().remove(sid) != null
+  clearPendingSubscribeToken(sid)
+  if(held || device.getDataValue(sidDataKey) != null || device.getDataValue(expiryDataKey) != null) {
+    logDebug("Removing SID for ${sid}")
+  }
   device.removeDataValue(sidDataKey)
   device.removeDataValue(expiryDataKey)
   clearSubscriptionExpiry(sid)
   if(sid == 'zgt') {
     // Remove the previous persisted epoch value; the formatted expiry is retained separately.
     device.removeDataValue('zgtSubExpiresEpoch')
+  }
+}
+/**
+ * Concurrent executions on one player can overwrite each other's device data writes, so a SID or expiry written when a
+ * subscription was accepted can be lost. The in-memory copy is authoritative; shortly after the last acceptance this
+ * rewrites any held SID or expiry that device data no longer shows.
+ */
+void scheduleSubscriptionDeviceDataSync() {
+  runIn(3, 'syncSubscriptionDeviceData', [overwrite: true])
+}
+void syncSubscriptionDeviceData() {
+  UPNP_SUBSCRIPTION_KEYS.each { String key ->
+    String sid = getSid(key)
+    if(sid == null) { return }
+    String sidDataKey = subscriptionIdDataKey(key)
+    if(device.getDataValue(sidDataKey) != sid) {
+      logDebug("Restoring device data ${sidDataKey}; a concurrent execution overwrote it")
+      setDeviceDataValue(sidDataKey, sid)
+    }
+    Long expiresEpoch = getSubscriptionExpiry(key)
+    if(expiresEpoch != null) {
+      String expiryDataKey = subscriptionExpiryDataKey(key)
+      String formatted = formatEpoch(expiresEpoch)
+      if(device.getDataValue(expiryDataKey) != formatted) {
+        logDebug("Restoring device data ${expiryDataKey}; a concurrent execution overwrote it")
+        setDeviceDataValue(expiryDataKey, formatted)
+      }
+    }
   }
 }
 @CompileStatic
@@ -5199,14 +5431,23 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
   enqueueUpnpRequest('unsubscribe', unsub, resub, subId, null, callback, evtSub)
 }
 
-void enqueueUpnpRequest(String operation, String method, String resub, String sidKey, String eventPath, String callbackPath, String eventUrl) {
+/**
+ * Queue a subscription request. An unsubscribe carries the SID it was asked to release, captured now: the
+ * stored SID is deleted locally right away when a player is re-initialized, so reading it at dispatch time
+ * would find nothing and skip the request. {@code extras.orphanSid} releases a SID this player does not hold.
+ */
+void enqueueUpnpRequest(String operation, String method, String resub, String sidKey, String eventPath, String callbackPath, String eventUrl, Map extras = [:]) {
   Map entry = getUpnpRequestQueue()
-  if(entry == null || !['sid1','sid2','zgt','sid4','sid5',CONTENT_DIRECTORY_SUBSCRIPTION_KEY,'alarmClock'].contains(sidKey)) { return }
+  if(entry == null || !UPNP_SUBSCRIPTION_KEYS.contains(sidKey)) { return }
+  String orphanSid = extras?.orphanSid?.toString()
   String subscribeMethod = defaultSubscribeMethod(sidKey)
   String resubscribeMethod = resub ?: defaultResubscribeMethod(sidKey)
   Map request = [guid: UUID.randomUUID().toString(), operation: operation, sidKey: sidKey,
     eventUrl: eventUrl, eventPath: eventPath, callbackPath: callbackPath, method: method, subscribeMethod: subscribeMethod, resub: resubscribeMethod,
-    sid: null, phase: 'queued', attempts: 0, dispatchedAt: null, deadlineAt: null, lifecycleGeneration: entry.generation]
+    sid: null, phase: 'queued', attempts: 0, dispatchedAt: null, deadlineAt: null, lifecycleGeneration: entry.generation,
+    capturedSid: operation == 'unsubscribe' ? (orphanSid ?: getSid(sidKey)) : null,
+    orphan: orphanSid != null,
+    token: null]
   Boolean added = false
   Integer pendingDepth = 0
   String activeGuid = null
@@ -5224,19 +5465,23 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
     Boolean duplicate = lastSameService != null
       ? lastSameService.operation == operation
       : (active != null && active.operation == operation && active.sidKey == sidKey)
+    if(orphanSid != null) {
+      // Each orphan SID is its own request; only the same SID is a duplicate.
+      duplicate = ((entry.queue as List<Map>) + (active != null ? [active] : [])).any { Map queued -> queued.capturedSid == orphanSid }
+    }
     if(!duplicate) { (entry.queue as List<Map>).add(request); added = true }
     pendingDepth = (entry.queue as List<Map>).size()
     activeGuid = entry.active?.guid as String
     queueGeneration = entry.generation as Long
-    if(operation == 'unsubscribe') {
+    if(operation == 'unsubscribe' && orphanSid == null) {
       if(resub) { removeResub(resub) }
       removeResub(subscribeMethod)
       switch(sidKey) {
-        case 'sid1': unschedule('retryUpnpSid1'); break
-        case 'sid2': unschedule('retryUpnpSid2'); break
+        case 'avTransport': unschedule('retryUpnpAvTransport'); break
+        case 'renderingControl': unschedule('retryUpnpRenderingControl'); break
         case 'zgt': unschedule('retryUpnpZgt'); break
-        case 'sid4': unschedule('retryUpnpSid4'); break
-        case 'sid5': unschedule('retryUpnpSid5'); break
+        case 'groupRenderingControl': unschedule('retryUpnpGroupRenderingControl'); break
+        case 'htControl': unschedule('retryUpnpHtControl'); break
         case CONTENT_DIRECTORY_SUBSCRIPTION_KEY: unschedule('retryContentDirectorySubscription'); break
         case 'alarmClock': unschedule('retryUpnpAlarmClock'); break
       }
@@ -5251,10 +5496,10 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
 }
 
 String defaultSubscribeMethod(String sidKey) {
-  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', zgt: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents', sid5: 'subscribeToHtControlEvents', contentDirectory: 'subscribeToContentDirectory', alarmClock: 'subscribeToAlarmClockEvents'][sidKey]
+  return [avTransport: 'subscribeToAVTransport', renderingControl: 'subscribeToMrRcEvents', zgt: 'subscribeToZgtEvents', groupRenderingControl: 'subscribeToMrGrcEvents', htControl: 'subscribeToHtControlEvents', contentDirectory: 'subscribeToContentDirectory', alarmClock: 'subscribeToAlarmClockEvents'][sidKey]
 }
 String defaultResubscribeMethod(String sidKey) {
-  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', zgt: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents', sid5: 'resubscribeToHtControlEvents', contentDirectory: 'resubscribeToContentDirectory', alarmClock: 'resubscribeToAlarmClockEvents'][sidKey]
+  return [avTransport: 'resubscribeToAVTransport', renderingControl: 'resubscribeToMrRcEvents', zgt: 'resubscribeToZgtEvents', groupRenderingControl: 'resubscribeToMrGrcEvents', htControl: 'resubscribeToHtControlEvents', contentDirectory: 'resubscribeToContentDirectory', alarmClock: 'resubscribeToAlarmClockEvents'][sidKey]
 }
 
 void dispatchNextUpnpRequest(Map entry) {
@@ -5305,6 +5550,10 @@ void dispatchUpnpRequest(Map entry, Map request) {
     if(entry.active?.guid != request.guid || request.phase != 'dispatching') { return }
     String sid = getSid(request.sidKey as String)
     if(!request.containsKey('expectedCurrentSid')) { request.expectedCurrentSid = sid }
+    // An unsubscribe releases the stored SID (a renewal may have replaced it since the request was queued). When
+    // none is stored any more because the player was re-initialized, it releases the SID captured at queue time.
+    // An orphan request always releases its own SID.
+    if(request.operation == 'unsubscribe' && request.capturedSid && (request.orphan == true || !sid)) { sid = request.capturedSid as String }
     if(request.operation == 'subscribe' && subValid(request.sidKey as String)) { redundant = true }
     if(request.operation == 'renew' && (!subValid(request.sidKey as String) || !sid)) {
       request.operation = 'subscribe'
@@ -5312,7 +5561,7 @@ void dispatchUpnpRequest(Map entry, Map request) {
     }
     request.sid = sid
     if(request.operation == 'unsubscribe') {
-      if(request.resub) { removeResub(request.resub as String) }
+      if(request.resub && request.orphan != true) { removeResub(request.resub as String) }
       missingUnsubscribeSid = !sid
     }
     if(!redundant && !missingUnsubscribeSid) { request.attempts = ((request.attempts ?: 0) as Integer) + 1 }
@@ -5324,6 +5573,13 @@ void dispatchUpnpRequest(Map entry, Map request) {
   String portValue = (endpoint.port ?: '1400').toString()
   String verb = request.operation == 'unsubscribe' ? 'UNSUBSCRIBE' : 'SUBSCRIBE'
   String target = request.eventUrl as String
+  if(!host) {
+    // No speaker address yet (the app has not written deviceIp). Skip the socket instead of dialing an
+    // empty host, which would log a connection warning; the normal retry schedule still applies.
+    logDebug("UPnP ${verb} ${target} guid=${request.guid} skipped; deviceIp is not set yet")
+    completeUpnpFailure(entry, request, 'device-ip-not-set')
+    return
+  }
   Boolean sidHeaderSent = request.operation == 'unsubscribe' || (request.operation == 'renew' && request.sid != null)
   StringBuilder http = new StringBuilder()
   String callbackUrl = null
@@ -5334,7 +5590,9 @@ void dispatchUpnpRequest(Map entry, Map request) {
     http.append('SID: ').append(request.sid).append('\r\n')
   } else {
     String callback = "${getLocation().getHub().localIP}:${getLocation().getHub().localSrvPortTCP}"
-    callbackUrl = "http://${callback}${request.eventPath}"
+    request.token = issueSubscribeToken(request.sidKey as String)
+    String callbackPath = "${request.eventPath}/${request.token}".toString()
+    callbackUrl = "http://${callback}${callbackPath}"
     http.append("CALLBACK: <${callbackUrl}>\r\nNT: upnp:event\r\n")
   }
   if(request.operation != 'unsubscribe') {
@@ -5476,6 +5734,8 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
         Long timeout = parseGrantedTimeout(headers['timeout'])
         if(sidValue) { updateSid(request.sidKey as String, [SID: sidValue], timeout) }
         else { updateSid(request.sidKey as String, [SID: request.sid], timeout) }
+        clearPendingSubscribeToken(request.sidKey as String)
+        scheduleSubscriptionDeviceDataSync()
         logDebug("UPnP SID accepted guid=${request.guid} sidKey=${request.sidKey} sidPresent=${sidValue != null} grantedTimeoutSeconds=${timeout} resubscribe=${request.resub ?: 'none'}")
         if(request.sidKey == 'zgt') {
           logDebug("ZGT subscription ${request.operation} accepted with SID, device data zgtSub updated")
@@ -5569,20 +5829,20 @@ void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverr
   Map options = [data: [request: retryRequest], overwrite: true]
   logDebug("Scheduling UPnP retry guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} attempt=${request.attempts} delaySeconds=${delay} generation=${request.lifecycleGeneration}")
   switch(request.sidKey) {
-    case 'sid1': runIn(delay, 'retryUpnpSid1', options); break
-    case 'sid2': runIn(delay, 'retryUpnpSid2', options); break
+    case 'avTransport': runIn(delay, 'retryUpnpAvTransport', options); break
+    case 'renderingControl': runIn(delay, 'retryUpnpRenderingControl', options); break
     case 'zgt': runIn(delay, 'retryUpnpZgt', options); break
-    case 'sid4': runIn(delay, 'retryUpnpSid4', options); break
-    case 'sid5': runIn(delay, 'retryUpnpSid5', options); break
+    case 'groupRenderingControl': runIn(delay, 'retryUpnpGroupRenderingControl', options); break
+    case 'htControl': runIn(delay, 'retryUpnpHtControl', options); break
     case CONTENT_DIRECTORY_SUBSCRIPTION_KEY: runIn(delay, 'retryContentDirectorySubscription', options); break
     case 'alarmClock': runIn(delay, 'retryUpnpAlarmClock', options); break
   }
 }
-void retryUpnpSid1(Map data) { retryUpnpRequest(data) }
-void retryUpnpSid2(Map data) { retryUpnpRequest(data) }
+void retryUpnpAvTransport(Map data) { retryUpnpRequest(data) }
+void retryUpnpRenderingControl(Map data) { retryUpnpRequest(data) }
 void retryUpnpZgt(Map data) { retryUpnpRequest(data) }
-void retryUpnpSid4(Map data) { retryUpnpRequest(data) }
-void retryUpnpSid5(Map data) { retryUpnpRequest(data) }
+void retryUpnpGroupRenderingControl(Map data) { retryUpnpRequest(data) }
+void retryUpnpHtControl(Map data) { retryUpnpRequest(data) }
 void retryContentDirectorySubscription(Map data) { retryUpnpRequest(data) }
 void retryUpnpAlarmClock(Map data) { retryUpnpRequest(data) }
 
@@ -5658,11 +5918,11 @@ void invalidateUpnpRequestsForDevice() {
     String activeGuid = entry.active?.guid as String
     entry.generation = ((entry.generation ?: 0L) as Long) + 1L
     logDebug("Invalidated UPnP queue dni=${dni} generation=${entry.generation} previousActiveGuid=${activeGuid ?: 'none'} discardedQueued=${queuedCount}")
-    unschedule('retryUpnpSid1')
-    unschedule('retryUpnpSid2')
+    unschedule('retryUpnpAvTransport')
+    unschedule('retryUpnpRenderingControl')
     unschedule('retryUpnpZgt')
-    unschedule('retryUpnpSid4')
-    unschedule('retryUpnpSid5')
+    unschedule('retryUpnpGroupRenderingControl')
+    unschedule('retryUpnpHtControl')
     unschedule('retryContentDirectorySubscription')
     unschedule('retryUpnpAlarmClock')
     active = entry.active as Map
@@ -5691,11 +5951,11 @@ void retireUpnpRequestsForDevice() {
     entry.generation = ((entry.generation ?: 0L) as Long) + 1L
     logDebug("Retired UPnP queue dni=${dni} generation=${entry.generation} previousActiveGuid=${activeGuid ?: 'none'} discardedQueued=${queuedCount}")
     unschedule('upnpSubscriptionWatchdog')
-    unschedule('retryUpnpSid1')
-    unschedule('retryUpnpSid2')
+    unschedule('retryUpnpAvTransport')
+    unschedule('retryUpnpRenderingControl')
     unschedule('retryUpnpZgt')
-    unschedule('retryUpnpSid4')
-    unschedule('retryUpnpSid5')
+    unschedule('retryUpnpGroupRenderingControl')
+    unschedule('retryUpnpHtControl')
     unschedule('retryContentDirectorySubscription')
     unschedule('retryUpnpAlarmClock')
     active = entry.active as Map
@@ -5711,8 +5971,8 @@ void retireUpnpRequestsForDevice() {
 // Retained legacy schedule/callback names. Old HubAction responses carry no GUID
 // and therefore cannot be allowed to mutate current subscription ownership.
 void unlockSubscribeMutexAfterTimeout(String sid) { logDebug("Ignoring legacy UPnP fallback for ${sid}") }
-void unlockSid1SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
-void unlockSid2SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockAvTransportSubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockRenderingControlSubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
 void unlockZgtSubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
 void unlockSubscribeMutexAfterTimeoutCallback(Map data) { logDebug('Ignoring legacy UPnP fallback callback') }
 void unlockUnsubscribeMutexAfterTimeout() { logDebug('Ignoring legacy UPnP fallback') }
@@ -5727,12 +5987,12 @@ void upnpUnsubscribeCallbackGeneric(String subId, String domain, HubResponse res
   logDebug("Ignoring legacy HubAction unsubscribe callback for ${domain}; no request GUID is available")
 }
 // /////////////////////////////////////////////////////////////////////////////
-// '/MediaRenderer/AVTransport/Event' //sid1
+// '/MediaRenderer/AVTransport/Event' //avTransport
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToAVTransport() {
   String sub = 'subscribeToAVTransport'
-  String subId = 'sid1'
+  String subId = 'avTransport'
   String subPath = '/avt'
   String evtSub = MRAVT_EVENTS
   String callback = MRAVT_EVENTS_CALLBACK
@@ -5742,7 +6002,7 @@ void subscribeToAVTransport() {
 @CompileStatic
 void resubscribeToAVTransport() {
   String resub = 'resubscribeToAVTransport'
-  String subId = 'sid1'
+  String subId = 'avTransport'
   String subPath = '/avt'
   String evtSub = MRAVT_EVENTS
   String callback = MRAVT_EVENTS_CALLBACK
@@ -5753,7 +6013,7 @@ void resubscribeToAVTransport() {
 void subscribeResubscribeToMrAvTCallback(HubResponse response) {
   String sub = 'subscribeToAVTransport'
   String resub = 'resubscribeToAVTransport'
-  String subId = 'sid1'
+  String subId = 'avTransport'
   String domain = MRAVT_EVENTS_DOMAIN
   subscribeResubscribeGenericCallback(sub, resub, subId, domain, response)
 }
@@ -5761,7 +6021,7 @@ void subscribeResubscribeToMrAvTCallback(HubResponse response) {
 @CompileStatic
 void unsubscribeFromAVTransport() {
   String unsub = 'unsubscribeFromAVTransport'
-  String subId = 'sid1'
+  String subId = 'avTransport'
   String resub = 'resubscribeToAVTransport'
   String evtSub = MRAVT_EVENTS
   String callback = MRAVT_EVENTS_UNSUB_CALLBACK
@@ -5770,17 +6030,17 @@ void unsubscribeFromAVTransport() {
 
 @CompileStatic
 void unsubscribeToMrAvTCallback(HubResponse response) {
-  String subId = 'sid1'
+  String subId = 'avTransport'
   String domain = MRAVT_EVENTS_DOMAIN
   upnpUnsubscribeCallbackGeneric(subId, domain, response)
 }
 // /////////////////////////////////////////////////////////////////////////////
-// '/MediaRenderer/RenderingControl/Event' //sid2
+// '/MediaRenderer/RenderingControl/Event' //renderingControl
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToMrRcEvents() {
   String sub = 'subscribeToMrRcEvents'
-  String subId = 'sid2'
+  String subId = 'renderingControl'
   String subPath = '/mrc'
   String evtSub = MRRC_EVENTS
   String callback = MRRC_EVENTS_CALLBACK
@@ -5790,7 +6050,7 @@ void subscribeToMrRcEvents() {
 @CompileStatic
 void resubscribeToMrRcEvents() {
   String resub = 'resubscribeToMrRcEvents'
-  String subId = 'sid2'
+  String subId = 'renderingControl'
   String subPath = '/mrc'
   String evtSub = MRRC_EVENTS
   String callback = MRRC_EVENTS_CALLBACK
@@ -5801,7 +6061,7 @@ void resubscribeToMrRcEvents() {
 void subscribeResubscribeMrRcCallback(HubResponse response) {
   String sub = 'subscribeToMrRcEvents'
   String resub = 'resubscribeToMrRcEvents'
-  String subId = 'sid2'
+  String subId = 'renderingControl'
   String domain = MRRC_EVENTS_DOMAIN
   subscribeResubscribeGenericCallback(sub, resub, subId, domain, response)
 }
@@ -5809,7 +6069,7 @@ void subscribeResubscribeMrRcCallback(HubResponse response) {
 @CompileStatic
 void unsubscribeFromMrRcEvents() {
   String unsub = 'unsubscribeFromMrRcEvents'
-  String subId = 'sid2'
+  String subId = 'renderingControl'
   String resub = 'resubscribeToMrRcEvents'
   String evtSub = MRRC_EVENTS
   String callback = MRRC_EVENTS_UNSUB_CALLBACK
@@ -5818,39 +6078,39 @@ void unsubscribeFromMrRcEvents() {
 
 @CompileStatic
 void unsubscribeFromMrRcEventsCallback(HubResponse response) {
-  String subId = 'sid2'
+  String subId = 'renderingControl'
   String domain = MRRC_EVENTS_DOMAIN
   upnpUnsubscribeCallbackGeneric(subId, domain, response)
 }
 
 // /////////////////////////////////////////////////////////////////////////////
-// '/MediaRenderer/GroupRenderingControl/Event' //sid4
+// '/MediaRenderer/GroupRenderingControl/Event' //groupRenderingControl
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToMrGrcEvents() {
-  upnpSubscribeGeneric('subscribeToMrGrcEvents', 'sid4', '/mgrc', MRGRC_EVENTS_CALLBACK, MRGRC_EVENTS)
+  upnpSubscribeGeneric('subscribeToMrGrcEvents', 'groupRenderingControl', '/mgrc', MRGRC_EVENTS_CALLBACK, MRGRC_EVENTS)
 }
 
 @CompileStatic
 void resubscribeToMrGrcEvents() {
-  upnpResubscribeGeneric('resubscribeToMrGrcEvents', 'sid4', '/mgrc', MRGRC_EVENTS_CALLBACK, MRGRC_EVENTS)
+  upnpResubscribeGeneric('resubscribeToMrGrcEvents', 'groupRenderingControl', '/mgrc', MRGRC_EVENTS_CALLBACK, MRGRC_EVENTS)
 }
 
 @CompileStatic
 void subscribeResubscribeToMrGrcCallback(HubResponse response) {
   subscribeResubscribeGenericCallback('subscribeToMrGrcEvents', 'resubscribeToMrGrcEvents',
-      'sid4', MRGRC_EVENTS_DOMAIN, response)
+      'groupRenderingControl', MRGRC_EVENTS_DOMAIN, response)
 }
 
 @CompileStatic
 void unsubscribeFromMrGrcEvents() {
-  upnpUnsubscribeGeneric('unsubscribeFromMrGrcEvents', 'sid4', 'resubscribeToMrGrcEvents',
+  upnpUnsubscribeGeneric('unsubscribeFromMrGrcEvents', 'groupRenderingControl', 'resubscribeToMrGrcEvents',
       MRGRC_EVENTS, MRGRC_EVENTS_UNSUB_CALLBACK)
 }
 
 @CompileStatic
 void unsubscribeFromMrGrcEventsCallback(HubResponse response) {
-  upnpUnsubscribeCallbackGeneric('sid4', MRGRC_EVENTS_DOMAIN, response)
+  upnpUnsubscribeCallbackGeneric('groupRenderingControl', MRGRC_EVENTS_DOMAIN, response)
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -5937,35 +6197,35 @@ void unsubscribeFromAlarmClockEventsCallback(HubResponse response) {
   upnpUnsubscribeCallbackGeneric('alarmClock', ALARM_CLOCK_EVENTS_DOMAIN, response)
 }
 // /////////////////////////////////////////////////////////////////////////////
-// '/HTControl/Event' //sid5
+// '/HTControl/Event' //htControl
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToHtControlEvents() {
-  upnpSubscribeGeneric('subscribeToHtControlEvents', 'sid5', '/htcontrol',
+  upnpSubscribeGeneric('subscribeToHtControlEvents', 'htControl', '/htcontrol',
       HTCONTROL_EVENTS_CALLBACK, HTCONTROL_EVENTS)
 }
 
 @CompileStatic
 void resubscribeToHtControlEvents() {
-  upnpResubscribeGeneric('resubscribeToHtControlEvents', 'sid5', '/htcontrol',
+  upnpResubscribeGeneric('resubscribeToHtControlEvents', 'htControl', '/htcontrol',
       HTCONTROL_EVENTS_CALLBACK, HTCONTROL_EVENTS)
 }
 
 @CompileStatic
 void subscribeResubscribeToHtControlCallback(HubResponse response) {
   subscribeResubscribeGenericCallback('subscribeToHtControlEvents', 'resubscribeToHtControlEvents',
-      'sid5', 'MediaRenderer/HTControl', response)
+      'htControl', 'MediaRenderer/HTControl', response)
 }
 
 @CompileStatic
 void unsubscribeFromHtControlEvents() {
-  upnpUnsubscribeGeneric('unsubscribeFromHtControlEvents', 'sid5', 'resubscribeToHtControlEvents',
+  upnpUnsubscribeGeneric('unsubscribeFromHtControlEvents', 'htControl', 'resubscribeToHtControlEvents',
       HTCONTROL_EVENTS, HTCONTROL_EVENTS_UNSUB_CALLBACK)
 }
 
 @CompileStatic
 void unsubscribeFromHtControlEventsCallback(HubResponse response) {
-  upnpUnsubscribeCallbackGeneric('sid5', 'MediaRenderer/HTControl', response)
+  upnpUnsubscribeCallbackGeneric('htControl', 'MediaRenderer/HTControl', response)
 }
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaServer/ContentDirectory/Event' //contentDirectory
@@ -6875,6 +7135,10 @@ void webSocketStatus(String message) {
     setWebSocketStatus('open')
   }
   else if(text == 'status: closing') {
+    if(isExpectedWebSocketClose()) {
+      logDebug('Ignoring primary WebSocket closing callback after a deliberate close')
+      return
+    }
     if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
       // connect() replaces the prior transport. A closing callback can belong to that
       // transport while the replacement attempt is already in flight.
@@ -6890,6 +7154,10 @@ void webSocketStatus(String message) {
     scheduleWebSocketReconnect()
   }
   else if(text.startsWith('failure:')) {
+    if(isExpectedWebSocketClose()) {
+      logDebug("Ignoring primary WebSocket failure callback after a deliberate close: ${text}")
+      return
+    }
     if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
       // Hubitat gives no socket identity, so a late failure from the replaced transport cannot be told
       // apart from this attempt's. The connect watchdog settles a genuine failure within seconds.
@@ -6951,6 +7219,8 @@ void wsConnect() {
     logTrace("Skipping primary WebSocket connect; status=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
     return
   }
+  // From here the connect-pending guard covers a late callback from the closed transport.
+  runtimeState.remove(WS_EXPECTED_CLOSE_UNTIL_KEY)
   String websocketUrl = getLocalWsUrl()
   if(!websocketUrl) {
     setWebSocketStatus('closed')
@@ -6988,7 +7258,14 @@ void websocketConnectWatchdog() {
 
 void wsClose() {
   logInfo("Closing primary WebSocket; status=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
+  runtimeState[WS_EXPECTED_CLOSE_UNTIL_KEY] = now() + WS_EXPECTED_CLOSE_WINDOW_MILLIS
   interfaces.webSocket.close()
+}
+
+/** True while the callbacks of a close this driver requested (initialization, shutdown) may still arrive. */
+Boolean isExpectedWebSocketClose() {
+  Long until = runtimeState[WS_EXPECTED_CLOSE_UNTIL_KEY] as Long
+  return until != null && now() < until
 }
 
 /** Stop all reconnect work and close the socket; used when the device is removed. */
@@ -7043,8 +7320,8 @@ void handleContentDirectoryPayload(String xmlBody) {
       if(name && valueText != null) { events << [name: name, value: valueText] }
     }
   }
-  Boolean favoritesChanged = events.any { Map event -> event.name == 'FavoritesUpdateID' }
-  Boolean playlistsChanged = events.any { Map event -> event.name == 'SavedQueuesUpdateID' }
+  Boolean favoritesChanged = catalogUpdateNeeded(events, 'FavoritesUpdateID', FAVORITES_UPDATE_TOKEN_KEY)
+  Boolean playlistsChanged = catalogUpdateNeeded(events, 'SavedQueuesUpdateID', PLAYLISTS_UPDATE_TOKEN_KEY)
   if(!isCatalogRefreshOwner()) {
     // Non-elected players do not browse on every notification. Drop the stale local catalog so the lazy
     // load refills it; a player with its own Favorites/Playlist child refreshes that device right away.
@@ -7060,6 +7337,24 @@ void handleContentDirectoryPayload(String xmlBody) {
   }
   if(favoritesChanged) { getFavorites() }
   if(playlistsChanged) { getPlaylists() }
+}
+
+/**
+ * Whether a ContentDirectory notification means a catalog has to be loaded again. A notification repeating the
+ * last token is not news. The first one after this player started tracking is loaded too: a browse that is in
+ * flight or recent cannot be tied to the catalog version the token names, so it may predate an edit.
+ */
+Boolean catalogUpdateNeeded(List<Map> events, String eventName, String tokenKey) {
+  Map event = events.find { Map candidate -> candidate.name == eventName }
+  if(event == null) { return false }
+  String token = event.value?.toString()
+  String previous = runtimeState[tokenKey]?.toString()
+  if(token == previous) {
+    logDebug("${eventName} is unchanged (${token}); not loading the catalog again")
+    return false
+  }
+  runtimeState[tokenKey] = token
+  return true
 }
 
 void subscribeToAudioClip() {

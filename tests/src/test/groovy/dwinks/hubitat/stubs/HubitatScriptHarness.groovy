@@ -134,9 +134,13 @@ class HubitatScriptHarness extends Script {
   List<MockDevice> children = []
   List<MockDevice> getChildDevices() { children }
   Object getChildDevice(String dni) { children.find { it.deviceNetworkId == dni } }
+  /** Properties passed to each addChildDevice call, so specs can assert what existed at creation. */
+  List<Map> addedChildProperties = []
   MockDevice addChildDevice(String namespace, String typeName, String dni, Map props = [:]) {
+    addedChildProperties << new LinkedHashMap(props)
     MockDevice d = new MockDevice(deviceNetworkId: dni, displayName: props.label ?: typeName, properties: props.properties ?: [:])
     d.deviceNetworkId = dni
+    (props.data instanceof Map ? (Map)props.data : [:]).each { Object key, Object value -> d.dataValues[key.toString()] = value?.toString() }
     children << d
     d
   }
@@ -152,6 +156,7 @@ class HubitatScriptHarness extends Script {
   String zwaveSecureEncap(hubitat.zwave.Command command) { "secure:${command.formatted}" }
   List<String> delayBetween(List<String> commands, Number delay) { commands }
   void sendHubCommand(Object command) { hubCommands << command }
+  void pauseExecution(Object milliseconds) { }
   void href(Object... args) { pageHrefs << args.toList() }
   List<MockInstalledApp> getChildApps() { app.childApps }
 

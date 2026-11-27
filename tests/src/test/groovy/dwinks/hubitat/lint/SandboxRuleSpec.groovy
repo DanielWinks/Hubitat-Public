@@ -62,10 +62,66 @@ class SandboxRuleSpec extends Specification {
     v.any { it.message.contains("'System.${method}") }
 
     where:
-    method       | call
-    'nanoTime'   | 'nanoTime()'
-    'getenv'     | "getenv('HOME')"
-    'getProperty'| "getProperty('user.dir')"
+    method              | call
+    'nanoTime'          | 'nanoTime()'
+    'currentTimeMillis' | 'currentTimeMillis()'
+    'getenv'            | "getenv('HOME')"
+    'getProperty'       | "getProperty('user.dir')"
+    'identityHashCode'  | 'identityHashCode(this)'
+    'lineSeparator'     | 'lineSeparator()'
+    'arraycopy'         | 'arraycopy(null, 0, null, 0, 0)'
+  }
+
+  def "System.currentTimeMillis is flagged with the alternatives, fully qualified or not"() {
+    given:
+    ParseResult pr = parse("""
+      definition(name: 'F', namespace: 'dwinks', author: 'Foo')
+      preferences { page(name: 'p') }
+      void doIt() { Long a = ${call} }
+    """.stripIndent())
+
+    when:
+    List<Violation> v = new SandboxRule().check(pr)
+
+    then:
+    v.size() == 1
+    v[0].severity == Severity.ERROR
+    v[0].message.contains("'System.currentTimeMillis")
+    v[0].message.contains('now()')
+
+    where:
+    call << ['System.currentTimeMillis()', 'java.lang.System.currentTimeMillis()']
+  }
+
+  def "System.out and System.err calls are flagged"() {
+    given:
+    ParseResult pr = parse("""
+      definition(name: 'F', namespace: 'dwinks', author: 'Foo')
+      preferences { page(name: 'p') }
+      void doIt() { System.${stream}.println('x') }
+    """.stripIndent())
+
+    when:
+    List<Violation> v = new SandboxRule().check(pr)
+
+    then:
+    v.any { it.message.contains("'System.${stream}.println") }
+
+    where:
+    stream << ['out', 'err']
+  }
+
+  def "the allowed clocks are not flagged"() {
+    given:
+    ParseResult pr = parse('''
+      import java.time.Instant
+      definition(name: 'F', namespace: 'dwinks', author: 'Foo')
+      preferences { page(name: 'p') }
+      void doIt() { Long a = Instant.now().toEpochMilli(); Long b = now(); Long c = new Date().getTime() }
+    '''.stripIndent())
+
+    expect:
+    new SandboxRule().check(pr).isEmpty()
   }
 
   def "fully qualified java.lang.System.nanoTime is flagged"() {
