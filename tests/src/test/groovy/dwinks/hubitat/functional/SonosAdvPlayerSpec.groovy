@@ -217,7 +217,7 @@ class SonosAdvPlayerSpec extends Specification {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.device.dataValues.contentDirectorySubscriptionId = 'uuid:cd-sid'
-    driver.eventTimestamps.put("${driver.getDeviceDNI()}-contentDirectory-expires".toString(), (System.currentTimeMillis() / 1000 as long) + 3600L)
+    driver.subscriptionExpiryEpochs.put("${driver.getDeviceDNI()}-contentDirectory".toString(), (System.currentTimeMillis() / 1000 as long) + 3600L)
 
     when:
     driver.resubscribeToContentDirectory()
@@ -539,6 +539,63 @@ class SonosAdvPlayerSpec extends Specification {
     driver.runtimeState.announcementPlaybackRestore == null
     driver.runtimeState.lastAnnouncementPlaybackRestoreFailure.reason == 'uri-dispatch-failed'
     playerStateMessages().findAll { it.phase == 'PLAYBACK_RESTORED' }*.restored == [false]
+
+    cleanup:
+    driver.setMetaClass(originalMetaClass)
+  }
+
+  def "announcement start and restore dispatch outside the announcement and runtime locks"() {
+    given:
+    driver.runtimeState.lastTransportPlaybackSnapshot = [
+      currentUri: 'x-rincon-queue:RINCON_TEST#0', track: '2', positionMillis: 41000L,
+      playMode: 'NORMAL', transportState: 'PLAYING'
+    ]
+    List<Map> held = []
+    Closure record = { String what ->
+      held << [what: what, announcement: Thread.holdsLock(driver.announcementLock()),
+        runtime: Thread.holdsLock(driver.getRuntimeState())]
+    }
+    MetaClass originalMetaClass = driver.getMetaClass()
+    driver.setMetaClass(new ExpandoMetaClass(driver.class, false, true))
+    driver.getMetaClass().initialize()
+    driver.metaClass.getParent = { -> new Expando(
+      playerAttributeUpdate: { Map payload -> },
+      playerStateUpdate: { Map payload -> if(payload?.phase) { record("progress:${payload.phase}") } },
+      groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> record("progress:${phase}") }) }
+    List<Map> soapCalls = []
+    driver.metaClass.postSonosSoapAsync = { String callback, Map params, Map data ->
+      soapCalls << [cb: callback, data: data]
+      record("soap:${callback}")
+    }
+    driver.metaClass.postSonosSoapAsync = { String callback, Map params ->
+      record("soap:${callback}")
+    }
+    driver.metaClass.componentSetGroupLevelLocal = { BigDecimal level -> record('groupLevel') }
+    driver.metaClass.logInfo = { String message -> record('logInfo') }
+    driver.metaClass.logWarn = { String message -> record('logWarn') }
+    driver.metaClass.restoreTemporaryAnnouncementVolume = { String corr, Integer previous, Integer announced ->
+      record('volumeRestore')
+    }
+
+    when:
+    driver.playerPlayGroupAnnouncementStream('http://example.test/first.mp3', 20G, 'lock-guid')
+    driver.restoreGroupAnnouncementPlayback('lock-guid')
+    Map uriRequest = soapCalls.find { it.cb == 'announcementPlaybackUriRestored' }
+    driver.announcementPlaybackUriRestored(new hubitat.scheduling.AsyncResponse(status: 500), uriRequest?.data)
+    // No matching snapshot: the plan's only effect is a PLAYBACK_RESTORED progress call to the parent.
+    driver.restoreGroupAnnouncementPlayback('no-such-announcement')
+
+    then:
+    uriRequest != null
+    held.any { it.what == 'soap:announcementPlaybackUriRestored' }
+    held.any { it.what.startsWith('progress:') }
+    held.any { it.what == 'groupLevel' }
+    held.any { it.what == 'logInfo' }
+    held.any { it.what == 'volumeRestore' }
+    // The non-blocking SOAP submission stays inside the announcement lock so ownership cannot change
+    // between the check and the send; nothing else, and no call at all under the runtime lock.
+    held.every { !it.runtime }
+    held.findAll { !it.what.startsWith('soap:') }.every { !it.announcement }
 
     cleanup:
     driver.setMetaClass(originalMetaClass)
@@ -1139,6 +1196,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.location.metaClass.getHub = { -> new Expando(localIP: '192.168.1.4', localSrvPortTCP: 39501) }
     driver.upnpRequestQueues.clear()
     driver.eventTimestamps.clear()
+    driver.subscriptionExpiryEpochs.clear()
     driver.device.dataValues.groupId = 'GROUP_TEST'
     driver.runtimeState.websocketStatus = 'open'
     driver.device.dataValues.groupCoordinatorId = 'RINCON_TEST'
@@ -1424,7 +1482,6 @@ class SonosAdvPlayerSpec extends Specification {
     given:
     driver.volumeFadeState.clear()
     driver.groupVolumeFadeState.clear()
-    driver.lastVolumeFadeCallTime.clear()
     driver.lastGroupVolumeFadeCallTime.clear()
     driver.device.currentValues.volume = 5
     driver.metaClass.now = { -> 10000L }
@@ -1453,11 +1510,49 @@ class SonosAdvPlayerSpec extends Specification {
     'setGroupVolume' | 'groupVolumeFadeStep' | 'groupVolumeFadeState'
   }
 
+  def "back-to-back fades each replace the running fade and ramp from its last sent step"() {
+    given:
+    driver.volumeFadeState.clear()
+    driver.pendingGroupedPlayerVolumes.clear()
+    driver.device.currentValues.volume = 10
+    driver.setLevel(50G, 10G)
+    Map firstData = driver.scheduled.findAll { List call -> call[1] == 'volumeFadeStep' }.last()[2].data
+    driver.volumeFadeStep(firstData)
+    driver.volumeFadeStep(firstData)
+    Integer lastSent = driver.volumeFadeState.get(driver.getId()).lastSentVolume as Integer
+    driver.scheduled.clear()
+
+    when: 'a second fade starts right away while the cached volume attribute still lags'
+    driver.setLevel(20G, 10G)
+
+    then: 'it is a real fade that starts from the last sent step, not an immediate jump'
+    lastSent > 10
+    Map fade = driver.volumeFadeState.get(driver.getId())
+    fade.startVolume == lastSent
+    fade.targetVolume == 20
+    driver.scheduled.any { List call -> call[1] == 'volumeFadeStep' }
+  }
+
+  def "an immediate setLevel after a fade cancels it and leaves no fade state"() {
+    given:
+    driver.volumeFadeState.clear()
+    driver.pendingGroupedPlayerVolumes.clear()
+    driver.device.currentValues.volume = 10
+    driver.setLevel(50G, 10G)
+    driver.unschedules.clear()
+
+    when:
+    driver.setLevel(30G)
+
+    then:
+    driver.volumeFadeState.isEmpty()
+    driver.unschedules.contains('volumeFadeStep')
+  }
+
   def "a fade step from a cancelled or replaced fade cannot send a volume or reschedule"() {
     given:
     driver.volumeFadeState.clear()
     driver.groupVolumeFadeState.clear()
-    driver.lastVolumeFadeCallTime.clear()
     driver.lastGroupVolumeFadeCallTime.clear()
     driver.pendingGroupedPlayerVolumes.clear()
     driver.device.currentValues.volume = 5
@@ -1556,7 +1651,7 @@ class SonosAdvPlayerSpec extends Specification {
   def "live subscription remains valid for its granted lease and repeated subscribe is coalesced"() {
     given:
     driver.setSid('zgt', 'uuid:zgt-live')
-    driver.eventTimestamps.put('SONOS-TEST-DNI-zgt-expires', Instant.now().getEpochSecond() + 1800L)
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-zgt', Instant.now().getEpochSecond() + 1800L)
 
     expect:
     driver.subValid('zgt')
@@ -1594,20 +1689,76 @@ class SonosAdvPlayerSpec extends Specification {
     driver.eventTimestamps.get('SONOS-TEST-DNI-lastZgtEvent') != null
   }
 
+  def "subscription with a persisted SID but unknown expiry is renewed and expiry lives in its own map"() {
+    given:
+    driver.setSid('zgt', 'uuid:zgt-live')
+
+    expect: 'a missing expiry (reboot or code save) means renew now'
+    driver.getSubscriptionExpiry('zgt') == null
+    !driver.subValid('zgt')
+
+    when:
+    driver.setSubscriptionExpiry('zgt', Instant.now().getEpochSecond() + 1800L)
+
+    then:
+    driver.subValid('zgt')
+    driver.eventTimestamps.keySet().every { !it.endsWith('-expires') }
+
+    when:
+    driver.clearSubscriptionExpiry('zgt')
+
+    then:
+    driver.getSubscriptionExpiry('zgt') == null
+    !driver.subValid('zgt')
+  }
+
   def "subscription is invalid when its SID is missing or lease is near expiry"() {
     given:
     driver.setSid('zgt', 'uuid:zgt-live')
-    driver.eventTimestamps.put('SONOS-TEST-DNI-zgt-expires', Instant.now().getEpochSecond() + 30L)
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-zgt', Instant.now().getEpochSecond() + 30L)
 
     expect:
     !driver.subValid('zgt')
 
     when:
-    driver.eventTimestamps.put('SONOS-TEST-DNI-zgt-expires', Instant.now().getEpochSecond() + 1800L)
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-zgt', Instant.now().getEpochSecond() + 1800L)
     driver.deleteSid('zgt')
 
     then:
     !driver.subValid('zgt')
+  }
+
+  def "missing, unusable and infinite TIMEOUT headers fall back to the requested lease"() {
+    expect:
+    driver.parseGrantedTimeout(header) == expected
+
+    where:
+    header            | expected
+    null              | 3600L
+    ''                | 3600L
+    'garbage'         | 3600L
+    'Second-infinite' | 3600L
+    'Second-1800'     | 1800L
+    'Second-5'        | 60L
+  }
+
+  def "lease fallback is the requested interval for expiry and renewal"() {
+    given:
+    long before = Instant.now().getEpochSecond()
+
+    when:
+    driver.updateSid('zgt', [SID: 'uuid:zgt-test'])
+    Long expiry = driver.subscriptionExpiryEpochs.get('SONOS-TEST-DNI-zgt')
+    driver.scheduleResubscriptionToEvents('resubscribeToZgtEvents')
+
+    then:
+    expiry >= before + 3600L
+    expiry <= Instant.now().getEpochSecond() + 3600L
+    driver.effectiveLeaseSeconds(null) == 3600L
+    driver.effectiveLeaseSeconds(0L) == 3600L
+    driver.effectiveLeaseSeconds(1800L) == 1800L
+    List job = driver.scheduled.find { List row -> row[1] == 'resubscribeToZgtEvents' }
+    (job[0] as Integer) <= 3600 * 85 / 100
   }
 
   def "subscription renewal follows the granted Sonos lease with per-player jitter"() {
@@ -1623,7 +1774,7 @@ class SonosAdvPlayerSpec extends Specification {
   def "expired renewal accepts the replacement SID returned by a fresh subscribe"() {
     given:
     driver.setSid('sid1', 'uuid:expired')
-    driver.eventTimestamps.put('SONOS-TEST-DNI-sid1-expires', Instant.now().getEpochSecond() - 60L)
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-sid1', Instant.now().getEpochSecond() - 60L)
 
     when:
     driver.upnpResubscribeGeneric('resubscribeToAVTransport', 'sid1', '/avt', 'callback',
@@ -1643,7 +1794,7 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.getSid('sid1') == 'uuid:replacement'
     driver.device.dataValues['sid1-expires'] != null
-    driver.eventTimestamps.get('SONOS-TEST-DNI-sid1-expires') > Instant.now().getEpochSecond()
+    driver.subscriptionExpiryEpochs.get('SONOS-TEST-DNI-sid1') > Instant.now().getEpochSecond()
     driver.scheduled.any { List row -> row[1] == 'resubscribeToAVTransport' }
     !driver.logs.any { String line -> line.contains('Ignoring UPnP SID update') }
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active == null
@@ -1652,7 +1803,7 @@ class SonosAdvPlayerSpec extends Specification {
   def "late fresh subscribe retry cannot replace a newer SID owner"() {
     given:
     driver.setSid('sid1', 'uuid:expired')
-    driver.eventTimestamps.put('SONOS-TEST-DNI-sid1-expires', Instant.now().getEpochSecond() - 60L)
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-sid1', Instant.now().getEpochSecond() - 60L)
 
     when:
     driver.upnpResubscribeGeneric('resubscribeToAVTransport', 'sid1', '/avt', 'callback',
@@ -1680,7 +1831,7 @@ class SonosAdvPlayerSpec extends Specification {
   def "renewal uses captured SID and unsubscribe preserves a replacement SID"() {
     given:
     driver.setSid('sid1', 'uuid:old')
-    driver.eventTimestamps.put('SONOS-TEST-DNI-sid1-expires', Instant.now().getEpochSecond() + 7200L)
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-sid1', Instant.now().getEpochSecond() + 7200L)
 
     when:
     driver.upnpResubscribeGeneric('renewAVTransportSubscription', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
@@ -2115,7 +2266,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') && entry.contains('SEQ=0') && entry.contains('SID=uuid:zgt-test') && entry.contains('X-SONOS-SERVICETYPE=ZoneGroupTopology') }
-    driver.logs.any { String entry -> entry.contains('UPnP NOTIFY parsed') && entry.contains('seq=0') }
+    driver.logs.any { String entry -> entry.contains('UPnP NOTIFY parsed') }
     driver.zgtMemberHostByPlayerId['RINCON_TEST'] == '192.168.1.50:1400'
     driver.zgtMemberHostByPlayerId['RINCON_B'] == '192.168.1.51:1400'
   }
@@ -2155,7 +2306,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') && entry.contains('SEQ=0') && entry.contains('SID=uuid:avt-test') && entry.contains('X-SONOS-SERVICETYPE=AVTransport') }
-    driver.logs.any { String entry -> entry.contains('UPnP NOTIFY parsed') && entry.contains('seq=0') }
+    driver.logs.any { String entry -> entry.contains('UPnP NOTIFY parsed') }
   }
 
   def "AVT parser preserves nested DIDL and ampersand entities"() {
@@ -2736,7 +2887,7 @@ class SonosAdvPlayerSpec extends Specification {
   def "initialization cleanup unsubscribes and clears the AlarmClock SID"() {
     given:
     driver.setSid('alarmClock', 'uuid:alarm-clock')
-    driver.eventTimestamps.put('SONOS-TEST-DNI-alarmClock-expires', Instant.now().getEpochSecond() + 1800L)
+    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-alarmClock', Instant.now().getEpochSecond() + 1800L)
     driver.device.dataValues['alarmClock-expires'] = 'later'
 
     when:
@@ -3109,6 +3260,31 @@ class SonosAdvPlayerSpec extends Specification {
     driver.asyncCalls.last().params.headers.SOAPAction.endsWith('#Play')
   }
 
+  def "favorite load applies play modes only after Sonos accepts the load"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.getFavoritesMap()['object-service-account'] = [
+      id: '353', name: 'Favorite 353', service: 'Amazon Music',
+      upnpUri: 'x-sonos-http:song%3a353.mp4?sid=204&flags=8232&sn=9',
+      upnpMetadata: '<DIDL-Lite><item id="10032028song%3a353"/></DIDL-Lite>'
+    ]
+
+    when:
+    driver.loadFavoriteFull('353', 'repeat all', 'replace', 'off', 'true', 'on')
+
+    then:
+    driver.asyncCalls.size() == 1
+    driver.asyncCalls.first().params.headers.SOAPAction.endsWith('#SetAVTransportURI')
+
+    when:
+    driver.favoriteLoadSoapCallback(new hubitat.scheduling.AsyncResponse(status: 200, data: ''), driver.asyncCalls.first().data)
+
+    then:
+    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#SetPlayMode') }
+    driver.asyncCalls.findIndexOf { it.params.headers.SOAPAction.endsWith('#SetPlayMode') } >
+      driver.asyncCalls.findIndexOf { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
+  }
+
   def "stop is queued even when the reported playback state is stopped"() {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.50'
@@ -3216,6 +3392,9 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver."${method}"(*arguments)
+    Map loadCall = driver.asyncCalls.find { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
+    String callback = method.toLowerCase(Locale.ROOT).contains('favorite') ? 'favoriteLoadSoapCallback' : 'playlistLoadSoapCallback'
+    driver."${callback}"(new hubitat.scheduling.AsyncResponse(status: 200, data: ''), loadCall.data)
 
     then:
     driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#SetCrossfadeMode') &&
@@ -3754,12 +3933,15 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.events.isEmpty()
   }
 
-  def "an RC notification is stamped before its headers are parsed, so a stalled older one cannot outrank a newer one"() {
+  def "an accepted RC notification is stamped before its XML is parsed, so a stalled older one cannot outrank a newer one"() {
     given:
-    List<Long> sequenceAtHeaderParse = []
+    List<Long> sequenceAtXmlParse = []
     String dni = driver.device.deviceNetworkId
+    driver.metaClass.isPlausibleXmlPayload = { String payload ->
+      sequenceAtXmlParse << driver.PARENT_SEQUENCE_BY_DNI.get(dni)
+      true
+    }
     driver.metaClass.getMapForRaw = { String rawMessage ->
-      sequenceAtHeaderParse << driver.PARENT_SEQUENCE_BY_DNI.get(dni)
       [headers: ['X-SONOS-SERVICETYPE': 'RenderingControl'], body: rawMessage.substring(rawMessage.indexOf('<propertyset'))]
     }
 
@@ -3767,9 +3949,28 @@ class SonosAdvPlayerSpec extends Specification {
     driver.parse(rcRaw('<Volume channel="Master" val="30"/>'))
     driver.parse(rcRaw('<Volume channel="Master" val="35"/>'))
 
-    then: 'the number was already taken when header parsing began'
-    sequenceAtHeaderParse == [1L, 2L]
+    then: 'the number was already taken when XML handling began'
+    sequenceAtXmlParse.unique() == [1L, 2L]
     parentPlayerUpdates.findAll { Map item -> item.kind == 'rcEvents' }*.sequence == [1L, 2L]
+  }
+
+  def "ignored NOTIFY messages do not consume a sequence number"() {
+    given:
+    String dni = driver.device.deviceNetworkId
+    Long before = driver.PARENT_SEQUENCE_BY_DNI.get(dni) ?: 0L
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      rawMessage.contains('empty') ? [headers: ['X-SONOS-SERVICETYPE': 'RenderingControl'], body: ''] :
+        rawMessage.contains('unknown') ? [headers: ['X-SONOS-SERVICETYPE': 'Mystery'], body: '<x/>'] :
+        [headers: [:], body: '<x/>']
+    }
+
+    when:
+    driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nempty')
+    driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nunknown')
+    driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nnoheaders')
+
+    then:
+    (driver.PARENT_SEQUENCE_BY_DNI.get(dni) ?: 0L) == before
   }
 
   private String rcRaw(String innerXml) {

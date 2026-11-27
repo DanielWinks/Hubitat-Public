@@ -964,6 +964,9 @@ metadata {
 @Field static ConcurrentHashMap<String, LinkedHashMap> playlistsMap = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static ConcurrentHashMap<String, String> favPlaylistDelegate = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, Long> eventTimestamps = new ConcurrentHashMap<String, Long>()
+// UPnP subscription lease expiry (epoch seconds) keyed "<dni>-<subscriptionKey>". In-memory only: after a reboot or
+// code save a missing entry is deliberately treated as "renew now" (see subValid).
+@Field static ConcurrentHashMap<String, Long> subscriptionExpiryEpochs = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, String> wsSubscriptionStatus = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, groovy.json.JsonSlurper> jsonSlurpers = new ConcurrentHashMap<String, groovy.json.JsonSlurper>()
 @Field static java.util.Random rand = new java.util.Random()
@@ -984,7 +987,7 @@ metadata {
   "x-sonos-vli:.*,spotify:": "Spotify",
   "x-rincon-queue": "Sonos Q"
 ]
-@Field final Integer RESUB_INTERVAL = 3600
+@Field static final Integer RESUB_INTERVAL = 3600
 
 @Field private final String MRAVT_EVENTS =  '/MediaRenderer/AVTransport/Event'
 @Field private final String MRAVT_EVENTS_CALLBACK =  'subscribeResubscribeToMrAvTCallback'
@@ -1026,6 +1029,7 @@ metadata {
 
 // One monitor per player so fade steps, immediate volume commands, cancellation and the grouped-volume flush
 // serialize for that player only; unrelated players in a multi-room fade stay independent.
+@Field static ConcurrentHashMap<String, Object> announcementLocks = new ConcurrentHashMap<String, Object>()
 @Field static ConcurrentHashMap<String, Object> volumeLocks = new ConcurrentHashMap<String, Object>()
 @Field static ConcurrentHashMap<String, Map> volumeFadeState = new ConcurrentHashMap<String, Map>()
 // Sonos recommends avoiding a burst of individual player-volume commands when
@@ -1035,7 +1039,6 @@ metadata {
 @Field static final Integer GROUPED_PLAYER_VOLUME_STAGGER_MS = 250
 
 @Field static ConcurrentHashMap<String, Map> groupVolumeFadeState = new ConcurrentHashMap<String, Map>()
-@Field static ConcurrentHashMap<String, Long> lastVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, Long> lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static final String ZGT_SUB_DEVICE_KEY = 'zgtSub'
 @Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
@@ -1581,7 +1584,6 @@ void removeHiddenJsonRuntimeState(String name) {
 
 void registerRinconId() {
   unschedule('registerRinconId')
-  unschedule('checkSubscriptions')
 }
 
 
@@ -1740,7 +1742,6 @@ void clearStaticDriverStateForCurrentDevice() {
     volumeFadeState?.remove(playerId)
     pendingGroupedPlayerVolumes?.remove(playerId)
     groupVolumeFadeState?.remove(playerId)
-    lastVolumeFadeCallTime?.remove(playerId)
     lastGroupVolumeFadeCallTime?.remove(playerId)
     zgtMemberHostByPlayerId?.remove(playerId)
   }
@@ -1754,6 +1755,7 @@ void clearStaticDriverStateForCurrentDevice() {
     jsonSlurpers?.remove(dni)
     wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
     eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
+    subscriptionExpiryEpochs?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
     Map upnpEntry = upnpRequestQueues?.get(dni)
     if(upnpEntry != null) {
       synchronized(upnpEntry.lock) {
@@ -1784,8 +1786,6 @@ void favoritesMapInitialization() {
   // Favorite and playlist catalogs are populated through UPnP ContentDirectory Browse.
 }
 
-@CompileStatic
-void checkSubscriptions() {}
 // =============================================================================
 // End Initialize and Configure
 // =============================================================================
@@ -2002,11 +2002,17 @@ Map stampParentPayload(Map payload) {
  * Send a request to the parent app. The call is direct: the app's entry point only stores data and returns
  * (or schedules its own callback), so nothing here waits on another device.
  */
-Boolean sendParentAppRequest(String action, Map args = [:]) {
+Boolean sendParentAppRequest(String action, Map args = [:], Map observedStamp = null) {
   String dni = device?.getDeviceNetworkId()
   if(!dni || parent == null) { return false }
-  Map payload = stampParentPayload([version: 1, channel: 'playerAppRequest', sourceDni: dni, action: action,
-    args: args ?: [:], requestId: UUID.randomUUID().toString()])
+  Map payload = [version: 1, channel: 'playerAppRequest', sourceDni: dni, action: action,
+    args: args ?: [:], requestId: UUID.randomUUID().toString()]
+  if(observedStamp != null) {
+    payload.put('epoch', observedStamp.epoch)
+    payload.put('sequence', observedStamp.sequence)
+  } else {
+    stampParentPayload(payload)
+  }
   logDebug("Sending parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${dni}")
   try { return parent.playerAppRequest(payload) as Boolean }
   catch(Exception e) {
@@ -2059,20 +2065,97 @@ void devicePlayTextNoRestore(String text, BigDecimal volume = null, String voice
   componentPlayTextNoRestoreLocal(text, volume, voice)
 }
 
+// -----------------------------------------------------------------------------
+// Announcement state and its lock
+//
+// announcementLock() guards compound reads and writes of the announcement and
+// snapshot keys in runtimeState (groupAnnouncementStream, announcementPlaybackSnapshot,
+// announcementPlaybackRestore, directStreamTtsRestore, pendingGroupAnnouncementTakeover).
+// It is deliberately not the runtimeState monitor, which the hot parse() queues use.
+// Under the lock, code only reads and writes that data and records what to do next
+// in a plan Map. After the lock is released, executeAnnouncementPlan() logs, restores
+// volume, dispatches SOAP and publishes progress to the parent.
+// Lock order: announcementLock, then (briefly) the runtimeState monitor. Never the reverse.
+// -----------------------------------------------------------------------------
+Object announcementLock() {
+  String key = device?.getDeviceNetworkId() ?: ''
+  Object lock = announcementLocks.get(key)
+  if(lock == null) {
+    Object created = new Object()
+    lock = announcementLocks.putIfAbsent(key, created) ?: created
+  }
+  return lock
+}
+
+Map newAnnouncementPlan() {
+  return [logs: [], volumeRestore: null, soap: null, progress: [], play: false]
+}
+
+void planAnnouncementLog(Map plan, String level, String message) {
+  ((List)plan.logs) << [level, message]
+}
+
+void executeAnnouncementPlan(Map plan) {
+  if(plan == null) { return }
+  ((List)plan.logs).each { Object entry ->
+    List item = (List)entry
+    String message = item[1]?.toString()
+    switch(item[0]) {
+      case 'warn': logWarn(message); break
+      case 'info': logInfo(message); break
+      default: logDebug(message)
+    }
+  }
+  Map volumeRestore = plan.volumeRestore as Map
+  if(volumeRestore != null) {
+    restoreTemporaryAnnouncementVolume(volumeRestore.correlationId?.toString(),
+        volumeRestore.previousVolume as Integer, volumeRestore.announcementVolume as Integer)
+  }
+  Map soap = plan.soap as Map
+  if(soap != null) {
+    Map data = soap.data as Map
+    String restoreId = data?.correlationId?.toString()
+    Map failure = null
+    // Ownership check and non-blocking asynchttp submission are one critical section with the code that
+    // starts a new announcement (which clears the restore), so a stale plan cannot touch the speaker after a
+    // newer announcement took ownership. Parent calls (progress) stay outside the lock.
+    synchronized(announcementLock()) {
+      Map active = runtimeState.announcementPlaybackRestore instanceof Map
+          ? (Map)runtimeState.announcementPlaybackRestore : null
+      if(restoreId != null && active?.correlationId?.toString() != restoreId) {
+        logDebug("Dropping stale announcement restore request ${restoreId}; ownership changed")
+      } else {
+        try {
+          postSonosSoapAsync(soap.callback?.toString(), soap.params as Map, data)
+        } catch(Exception e) {
+          failure = newAnnouncementPlan()
+          planCompleteAnnouncementRestore(failure, restoreId, false, "${data?.stage}-dispatch-failed".toString())
+        }
+      }
+    }
+    if(failure != null) { executeAnnouncementPlan(failure) }
+  }
+  ((List)plan.progress).each { Object entry ->
+    Map progress = (Map)entry
+    publishGroupAnnouncementProgress(progress.correlationId?.toString(), progress.phase?.toString(), progress.details as Map)
+  }
+}
+
 /** Start an announcement as a coordinator-owned stream when no source is active. */
 void playerPlayGroupAnnouncementStream(String uri, BigDecimal volume, String correlationId) {
-  synchronized(getRuntimeState()) {
-    if(!uri || !correlationId) {
-      logWarn('Cannot start group announcement stream without a URI and correlation ID')
-      return
-    }
-    Integer targetVolume = getAnnouncementVolume(volume)
+  if(!uri || !correlationId) {
+    logWarn('Cannot start group announcement stream without a URI and correlation ID')
+    return
+  }
+  Integer targetVolume = getAnnouncementVolume(volume)
+  Integer previousGroupVolume = getGroupVolumeState()
+  if(previousGroupVolume == null) { previousGroupVolume = getPlayerVolume() }
+  Map captured = null
+  synchronized(announcementLock()) {
     Map existingSnapshot = runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] instanceof Map
         ? (Map)runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] : null
     Map previousAnnouncement = runtimeState.groupAnnouncementStream instanceof Map
         ? (Map)runtimeState.groupAnnouncementStream : null
-    Integer previousGroupVolume = getGroupVolumeState()
-    if(previousGroupVolume == null) { previousGroupVolume = getPlayerVolume() }
     Map savedPlayback = existingSnapshot != null && previousAnnouncement != null
         ? new LinkedHashMap(existingSnapshot)
         : getLastTransportPlaybackSnapshot()
@@ -2083,64 +2166,73 @@ void playerPlayGroupAnnouncementStream(String uri, BigDecimal volume, String cor
       savedPlayback.previousGroupVolume = previousGroupVolume
       savedPlayback.announcementVolume = targetVolume
       runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] = savedPlayback
-      logInfo("Captured pre-announcement transport for ${correlationId}: uri=${savedPlayback.currentUri}, metadataLength=${savedPlayback.currentUriMetaData?.toString()?.length() ?: 0}, trackUri=${savedPlayback.trackUri}, track=${savedPlayback.track}, positionMillis=${savedPlayback.positionMillis}, playMode=${savedPlayback.playMode}, transportState=${savedPlayback.transportState}, observedAt=${savedPlayback.observedAt}")
-    } else {
-      logWarn("No AVTransport snapshot is available to restore after announcement ${correlationId}")
+      captured = new LinkedHashMap(savedPlayback)
     }
     runtimeState.remove('announcementPlaybackRestore')
     runtimeState.groupAnnouncementStream = [correlationId: correlationId, uri: uri,
         phase: 'LOADING', activeObserved: false, previousGroupVolume: previousGroupVolume,
         announcementVolume: targetVolume]
-    logInfo("Starting group announcement stream ${correlationId} on coordinator ${getId()} at volume=${targetVolume}")
-    componentSetGroupLevelLocal(new BigDecimal(targetVolume))
-    setAVTransportURIAndPlay(uri, null, [groupAnnouncementCorrelationId: correlationId])
   }
+  if(captured != null) {
+    logInfo("Captured pre-announcement transport for ${correlationId}: uri=${captured.currentUri}, metadataLength=${captured.currentUriMetaData?.toString()?.length() ?: 0}, trackUri=${captured.trackUri}, track=${captured.track}, positionMillis=${captured.positionMillis}, playMode=${captured.playMode}, transportState=${captured.transportState}, observedAt=${captured.observedAt}")
+  } else {
+    logWarn("No AVTransport snapshot is available to restore after announcement ${correlationId}")
+  }
+  logInfo("Starting group announcement stream ${correlationId} on coordinator ${getId()} at volume=${targetVolume}")
+  componentSetGroupLevelLocal(new BigDecimal(targetVolume))
+  setAVTransportURIAndPlay(uri, null, [groupAnnouncementCorrelationId: correlationId])
 }
 
 /** Restore the coordinator's captured transport after its group announcement. */
 void restoreGroupAnnouncementPlayback(String correlationId) {
-  synchronized(getRuntimeState()) {
-    Map snapshot = runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] instanceof Map
-        ? (Map)runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] : null
-    Map announcement = runtimeState.groupAnnouncementStream instanceof Map
-        ? (Map)runtimeState.groupAnnouncementStream : null
-    Boolean matchingAnnouncement = announcement?.correlationId?.toString() == correlationId
-    Boolean matchingSnapshot = snapshot?.correlationId?.toString() == correlationId
-    if(!matchingSnapshot && (!matchingAnnouncement || snapshot != null)) {
-      logDebug("No matching playback snapshot to restore for ${correlationId}")
-      publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: false])
-      return
-    }
-    if(runtimeState.announcementPlaybackRestore?.correlationId == correlationId) { return }
-    String uri = matchingSnapshot ? snapshot.currentUri?.toString() : null
-    String announcementUri = matchingSnapshot ? snapshot.announcementUri?.toString() : announcement?.uri?.toString()
-    String currentSource = device.currentValue('audioSource')?.toString()
-    if(currentSource && announcementUri && currentSource != announcementUri &&
-        runtimeState.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
-      logInfo("Skipping playback and volume restore for ${correlationId}; another source is active")
-      runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
-      runtimeState.remove('groupAnnouncementStream')
-      publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: false, skipped: 'external-playback'])
-      return
-    }
-    Integer previousGroupVolume = matchingAnnouncement
-        ? (announcement.previousGroupVolume as Integer)
-        : (matchingSnapshot ? snapshot.previousGroupVolume as Integer : null)
-    Integer announcementVolume = matchingAnnouncement
-        ? (announcement.announcementVolume as Integer)
-        : (matchingSnapshot ? snapshot.announcementVolume as Integer : null)
-    restoreTemporaryAnnouncementVolume(correlationId, previousGroupVolume, announcementVolume)
-    if(!uri) {
-      logWarn("Captured transport for ${correlationId} has no URI; skipping playback restore")
-      runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
-      runtimeState.remove('groupAnnouncementStream')
-      publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: false])
-      return
-    }
-    runtimeState.announcementPlaybackRestore = [correlationId: correlationId, snapshot: snapshot, attempt: 1]
-    logInfo("Restoring pre-announcement transport for ${correlationId}: ${uri}")
-    setAVTransportURIForAnnouncementRestore(uri, snapshot.currentUriMetaData?.toString(), correlationId)
+  Map plan = newAnnouncementPlan()
+  synchronized(announcementLock()) { planGroupAnnouncementPlaybackRestore(plan, correlationId) }
+  executeAnnouncementPlan(plan)
+}
+
+void planGroupAnnouncementPlaybackRestore(Map plan, String correlationId) {
+  Map snapshot = runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] instanceof Map
+      ? (Map)runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] : null
+  Map announcement = runtimeState.groupAnnouncementStream instanceof Map
+      ? (Map)runtimeState.groupAnnouncementStream : null
+  Boolean matchingAnnouncement = announcement?.correlationId?.toString() == correlationId
+  Boolean matchingSnapshot = snapshot?.correlationId?.toString() == correlationId
+  if(!matchingSnapshot && (!matchingAnnouncement || snapshot != null)) {
+    planAnnouncementLog(plan, 'debug', "No matching playback snapshot to restore for ${correlationId}".toString())
+    ((List)plan.progress) << [correlationId: correlationId, phase: 'PLAYBACK_RESTORED', details: [restored: false]]
+    return
   }
+  if(runtimeState.announcementPlaybackRestore?.correlationId == correlationId) { return }
+  String uri = matchingSnapshot ? snapshot.currentUri?.toString() : null
+  String announcementUri = matchingSnapshot ? snapshot.announcementUri?.toString() : announcement?.uri?.toString()
+  String currentSource = device.currentValue('audioSource')?.toString()
+  if(currentSource && announcementUri && currentSource != announcementUri &&
+      runtimeState.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
+    planAnnouncementLog(plan, 'info', "Skipping playback and volume restore for ${correlationId}; another source is active".toString())
+    runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
+    runtimeState.remove('groupAnnouncementStream')
+    ((List)plan.progress) << [correlationId: correlationId, phase: 'PLAYBACK_RESTORED',
+        details: [restored: false, skipped: 'external-playback']]
+    return
+  }
+  Integer previousGroupVolume = matchingAnnouncement
+      ? (announcement.previousGroupVolume as Integer)
+      : (matchingSnapshot ? snapshot.previousGroupVolume as Integer : null)
+  Integer announcementVolume = matchingAnnouncement
+      ? (announcement.announcementVolume as Integer)
+      : (matchingSnapshot ? snapshot.announcementVolume as Integer : null)
+  plan.volumeRestore = [correlationId: correlationId, previousVolume: previousGroupVolume,
+      announcementVolume: announcementVolume]
+  if(!uri) {
+    planAnnouncementLog(plan, 'warn', "Captured transport for ${correlationId} has no URI; skipping playback restore".toString())
+    runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
+    runtimeState.remove('groupAnnouncementStream')
+    ((List)plan.progress) << [correlationId: correlationId, phase: 'PLAYBACK_RESTORED', details: [restored: false]]
+    return
+  }
+  runtimeState.announcementPlaybackRestore = [correlationId: correlationId, snapshot: snapshot, attempt: 1]
+  planAnnouncementLog(plan, 'info', "Restoring pre-announcement transport for ${correlationId}: ${uri}".toString())
+  planSetAnnouncementRestoreUri(plan, uri, snapshot.currentUriMetaData?.toString(), correlationId)
 }
 
 /** Restore the prior group level only if the announcement's volume is still active. */
@@ -2165,7 +2257,8 @@ Map getCurrentAnnouncementRestore(String correlationId, String stage = null) {
 }
 
 void retryAnnouncementPlaybackUri(Map data = null) {
-  synchronized(getRuntimeState()) {
+  Map plan = newAnnouncementPlan()
+  synchronized(announcementLock()) {
     String correlationId = data?.correlationId?.toString()
     Map active = getCurrentAnnouncementRestore(correlationId, 'uri-retry')
     if(active == null || active.attempt != data?.attempt) { return }
@@ -2173,39 +2266,38 @@ void retryAnnouncementPlaybackUri(Map data = null) {
     String source = device.currentValue('audioSource')?.toString()
     if(source && snapshot.announcementUri && source != snapshot.announcementUri &&
         runtimeState.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
-      completeAnnouncementPlaybackRestore(correlationId, false, 'external-playback')
-      return
+      planCompleteAnnouncementRestore(plan, correlationId, false, 'external-playback')
+    } else {
+      planSetAnnouncementRestoreUri(plan, snapshot.currentUri?.toString(),
+          snapshot.currentUriMetaData?.toString(), correlationId)
     }
-    setAVTransportURIForAnnouncementRestore(snapshot.currentUri?.toString(),
-        snapshot.currentUriMetaData?.toString(), correlationId)
   }
+  executeAnnouncementPlan(plan)
 }
 
-void dispatchAnnouncementRestore(String correlationId, String stage, String callback, Map params) {
+void planAnnouncementRestoreDispatch(Map plan, String correlationId, String stage, String callback, Map params) {
   Map active = getCurrentAnnouncementRestore(correlationId)
   if(active == null) { return }
   active.stage = stage
   params.timeout = 5
-  try {
-    postSonosSoapAsync(callback, params, [correlationId: correlationId, attempt: active.attempt, stage: stage])
-  } catch(Exception e) {
-    completeAnnouncementPlaybackRestore(correlationId, false, "${stage}-dispatch-failed")
-  }
+  plan.soap = [callback: callback, params: params,
+      data: [correlationId: correlationId, attempt: active.attempt, stage: stage]]
 }
 
-void setAVTransportURIForAnnouncementRestore(String uri, String metadata, String correlationId) {
+void planSetAnnouncementRestoreUri(Map plan, String uri, String metadata, String correlationId) {
   String ip = getLocalUpnpHostForGroupOperation()
-  if(!ip) { finishAnnouncementPlaybackRestore(correlationId, false, 'coordinator-unavailable'); return }
+  if(!ip) { planFinishAnnouncementRestore(plan, correlationId, false, 'coordinator-unavailable'); return }
   // The MarkupBuilder SOAP builder XML-escapes values; pass raw values here
   // to avoid double-escaping.
   Map restoreService = AVTransport + [actions: [SetAVTransportURI: [arguments: [InstanceID: 0]]]]
   Map values = [CurrentURI: uri, CurrentURIMetaData: metadata]
   Map params = getSoapActionParams(ip, restoreService, 'SetAVTransportURI', values)
-  dispatchAnnouncementRestore(correlationId, 'uri', 'announcementPlaybackUriRestored', params)
+  planAnnouncementRestoreDispatch(plan, correlationId, 'uri', 'announcementPlaybackUriRestored', params)
 }
 
 void announcementPlaybackUriRestored(AsyncResponse response, Map data = null) {
-  synchronized(getRuntimeState()) {
+  Map plan = newAnnouncementPlan()
+  synchronized(announcementLock()) {
     String correlationId = data?.correlationId?.toString()
     Map active = getCurrentAnnouncementRestore(correlationId, 'uri')
     if(active == null || active.attempt != data?.attempt) { return }
@@ -2216,25 +2308,26 @@ void announcementPlaybackUriRestored(AsyncResponse response, Map data = null) {
       if(status != null && status >= 500 && status < 600 && attempt <= ANNOUNCEMENT_RESTORE_RETRY_DELAYS.size()) {
         active.stage = 'uri-retry'
         active.attempt = attempt + 1
-        logDebug("Scheduling playback restore attempt ${active.attempt} for ${correlationId} after HTTP ${status}")
+        planAnnouncementLog(plan, 'debug', "Scheduling playback restore attempt ${active.attempt} for ${correlationId} after HTTP ${status}".toString())
         runIn(ANNOUNCEMENT_RESTORE_RETRY_DELAYS[attempt - 1], 'retryAnnouncementPlaybackUri',
             [overwrite: false, data: [correlationId: correlationId, attempt: active.attempt]])
-        return
+      } else {
+        planFinishAnnouncementRestore(plan, correlationId, false, "set-uri-failed-${status}".toString())
       }
-      finishAnnouncementPlaybackRestore(correlationId, false, "set-uri-failed-${status}")
-      return
+    } else {
+      active.remove('status')
+      planAdvanceAnnouncementRestore(plan, correlationId, active.snapshot as Map)
     }
-    active.remove('status')
-    advanceAnnouncementPlaybackRestore(correlationId, active.snapshot as Map)
   }
+  executeAnnouncementPlan(plan)
 }
 
-void advanceAnnouncementPlaybackRestore(String correlationId, Map snapshot) {
+void planAdvanceAnnouncementRestore(Map plan, String correlationId, Map snapshot) {
   String uri = snapshot.currentUri?.toString()
   // Live radio can report a track number and position, but Sonos cannot seek it.
   if(uri?.startsWith('x-rincon-mp3radio:') || uri?.startsWith('x-sonosapi-stream:') ||
       uri?.startsWith('x-sonosapi-radio:')) {
-    finishAnnouncementPlaybackRestore(correlationId, true, null)
+    planFinishAnnouncementRestore(plan, correlationId, true, null)
     return
   }
   Integer track = null
@@ -2242,70 +2335,74 @@ void advanceAnnouncementPlaybackRestore(String correlationId, Map snapshot) {
   Long positionMillis = null
   try { positionMillis = snapshot.positionMillis?.toString()?.toLong() } catch(Exception ignored) { positionMillis = null }
   if(track != null && track > 0) {
-    sendAnnouncementRestoreSeek(correlationId, 'TRACK_NR', track.toString(), 'track')
+    planAnnouncementRestoreSeek(plan, correlationId, 'TRACK_NR', track.toString(), 'track')
   } else if(positionMillis != null && positionMillis > 0L) {
-    sendAnnouncementRestoreSeek(correlationId, 'REL_TIME', formatSonosTime(positionMillis), 'position')
+    planAnnouncementRestoreSeek(plan, correlationId, 'REL_TIME', formatSonosTime(positionMillis), 'position')
   } else {
-    restoreAnnouncementPlayMode(correlationId)
+    planAnnouncementRestorePlayMode(plan, correlationId)
   }
 }
 
-void sendAnnouncementRestoreSeek(String correlationId, String unit, String target, String stage) {
+void planAnnouncementRestoreSeek(Map plan, String correlationId, String unit, String target, String stage) {
   String ip = getLocalUpnpHostForGroupOperation()
-  if(!ip) { finishAnnouncementPlaybackRestore(correlationId, false, 'coordinator-unavailable'); return }
+  if(!ip) { planFinishAnnouncementRestore(plan, correlationId, false, 'coordinator-unavailable'); return }
   Map params = getSoapActionParams(ip, AVTransport, 'Seek', [Unit: unit, Target: target])
-  dispatchAnnouncementRestore(correlationId, stage, 'announcementPlaybackSeekRestored', params)
+  planAnnouncementRestoreDispatch(plan, correlationId, stage, 'announcementPlaybackSeekRestored', params)
 }
 
 void announcementPlaybackSeekRestored(AsyncResponse response, Map data = null) {
-  synchronized(getRuntimeState()) {
+  Map plan = newAnnouncementPlan()
+  synchronized(announcementLock()) {
     String correlationId = data?.correlationId?.toString()
     String stage = data?.stage?.toString()
     if(!(stage in ['track', 'position'])) { return }
     Map active = getCurrentAnnouncementRestore(correlationId, stage)
     if(active == null || active.attempt != data?.attempt) { return }
     if(response?.status != 200 || response.hasError()) {
-      active.stepFailure = [stage: data?.stage, status: response?.status, reason: "${data?.stage}-restore-failed-${response?.status}"]
-      logWarn("Could not restore ${data?.stage} for announcement ${correlationId}: status=${response?.status}")
-      restoreAnnouncementPlayMode(correlationId)
-      return
-    }
-    Map snapshot = active.snapshot instanceof Map ? (Map)active.snapshot : [:]
-    if(data?.stage == 'track') {
+      active.stepFailure = [stage: data?.stage, status: response?.status, reason: "${data?.stage}-restore-failed-${response?.status}".toString()]
+      planAnnouncementLog(plan, 'warn', "Could not restore ${data?.stage} for announcement ${correlationId}: status=${response?.status}".toString())
+      planAnnouncementRestorePlayMode(plan, correlationId)
+    } else {
+      Map snapshot = active.snapshot instanceof Map ? (Map)active.snapshot : [:]
       Long positionMillis = null
-      try { positionMillis = snapshot.positionMillis?.toString()?.toLong() } catch(Exception ignored) { positionMillis = null }
+      if(data?.stage == 'track') {
+        try { positionMillis = snapshot.positionMillis?.toString()?.toLong() } catch(Exception ignored) { positionMillis = null }
+      }
       if(positionMillis != null && positionMillis > 0L) {
-        sendAnnouncementRestoreSeek(correlationId, 'REL_TIME', formatSonosTime(positionMillis), 'position')
-        return
+        planAnnouncementRestoreSeek(plan, correlationId, 'REL_TIME', formatSonosTime(positionMillis), 'position')
+      } else {
+        planAnnouncementRestorePlayMode(plan, correlationId)
       }
     }
-    restoreAnnouncementPlayMode(correlationId)
   }
+  executeAnnouncementPlan(plan)
 }
 
-void restoreAnnouncementPlayMode(String correlationId) {
+void planAnnouncementRestorePlayMode(Map plan, String correlationId) {
   Map active = getCurrentAnnouncementRestore(correlationId)
   Map snapshot = active?.snapshot instanceof Map ? (Map)active.snapshot : [:]
   String playMode = snapshot.playMode?.toString()
-  if(!playMode) { finishAnnouncementPlaybackRestore(correlationId, true, null); return }
+  if(!playMode) { planFinishAnnouncementRestore(plan, correlationId, true, null); return }
   String ip = getLocalUpnpHostForGroupOperation()
-  if(!ip) { finishAnnouncementPlaybackRestore(correlationId, false, 'coordinator-unavailable'); return }
+  if(!ip) { planFinishAnnouncementRestore(plan, correlationId, false, 'coordinator-unavailable'); return }
   Map params = getSoapActionParams(ip, AVTransport, 'SetPlayMode', [NewPlayMode: playMode])
-  dispatchAnnouncementRestore(correlationId, 'play-mode', 'announcementPlaybackPlayModeRestored', params)
+  planAnnouncementRestoreDispatch(plan, correlationId, 'play-mode', 'announcementPlaybackPlayModeRestored', params)
 }
 
 void announcementPlaybackPlayModeRestored(AsyncResponse response, Map data = null) {
-  synchronized(getRuntimeState()) {
+  Map plan = newAnnouncementPlan()
+  synchronized(announcementLock()) {
     String correlationId = data?.correlationId?.toString()
     Map active = getCurrentAnnouncementRestore(correlationId, 'play-mode')
     if(active == null || active.attempt != data?.attempt) { return }
     Boolean success = response?.status == 200 && response.hasError() == false
     if(!success) {
-      active.stepFailure = active.stepFailure ?: [stage: 'play-mode', status: response?.status, reason: "play-mode-restore-failed-${response?.status}"]
-      logWarn("Could not restore play mode for announcement ${correlationId}: status=${response?.status}")
+      active.stepFailure = active.stepFailure ?: [stage: 'play-mode', status: response?.status, reason: "play-mode-restore-failed-${response?.status}".toString()]
+      planAnnouncementLog(plan, 'warn', "Could not restore play mode for announcement ${correlationId}: status=${response?.status}".toString())
     }
-    finishAnnouncementPlaybackRestore(correlationId, true, null)
+    planFinishAnnouncementRestore(plan, correlationId, true, null)
   }
+  executeAnnouncementPlan(plan)
 }
 
 String formatSonosTime(Long positionMillis) {
@@ -2317,7 +2414,7 @@ String formatSonosTime(Long positionMillis) {
   return String.format(Locale.ROOT, '%02d:%02d:%02d', hours, minutes, seconds)
 }
 
-void finishAnnouncementPlaybackRestore(String correlationId, Boolean success, String reason) {
+void planFinishAnnouncementRestore(Map plan, String correlationId, Boolean success, String reason) {
   Map active = getCurrentAnnouncementRestore(correlationId)
   if(active?.correlationId?.toString() != correlationId) { return }
   Map snapshot = active.snapshot instanceof Map ? (Map)active.snapshot : [:]
@@ -2326,28 +2423,30 @@ void finishAnnouncementPlaybackRestore(String correlationId, Boolean success, St
     if(ip) {
       String action = snapshot.transportState?.toString() == 'PAUSED_PLAYBACK' ? 'Pause' : 'Play'
       Map params = getSoapActionParams(ip, AVTransport, action)
-      dispatchAnnouncementRestore(correlationId, 'transport', 'announcementPlaybackTransportRestored', params)
+      planAnnouncementRestoreDispatch(plan, correlationId, 'transport', 'announcementPlaybackTransportRestored', params)
       return
     }
     success = false
     reason = 'coordinator-unavailable'
   }
-  completeAnnouncementPlaybackRestore(correlationId, success, reason)
+  planCompleteAnnouncementRestore(plan, correlationId, success, reason)
 }
 
 void announcementPlaybackTransportRestored(AsyncResponse response, Map data = null) {
-  synchronized(getRuntimeState()) {
+  Map plan = newAnnouncementPlan()
+  synchronized(announcementLock()) {
     String correlationId = data?.correlationId?.toString()
     Map active = getCurrentAnnouncementRestore(correlationId, 'transport')
     if(active == null || active.attempt != data?.attempt) { return }
     Boolean success = response?.status == 200 && response.hasError() == false
     if(!success) { active.status = response?.status }
-    completeAnnouncementPlaybackRestore(correlationId, success,
-        success ? null : "transport-resume-failed-${response?.status}")
+    planCompleteAnnouncementRestore(plan, correlationId, success,
+        success ? null : "transport-resume-failed-${response?.status}".toString())
   }
+  executeAnnouncementPlan(plan)
 }
 
-void completeAnnouncementPlaybackRestore(String correlationId, Boolean success, String reason) {
+void planCompleteAnnouncementRestore(Map plan, String correlationId, Boolean success, String reason) {
   Map active = getCurrentAnnouncementRestore(correlationId)
   if(active?.correlationId?.toString() != correlationId) { return }
   Map failure = active.stepFailure as Map
@@ -2369,8 +2468,9 @@ void completeAnnouncementPlaybackRestore(String correlationId, Boolean success, 
   if(runtimeState.groupAnnouncementStream?.correlationId == correlationId) {
     runtimeState.remove('groupAnnouncementStream')
   }
-  if(!success) { logWarn("Playback restore for ${correlationId} was incomplete: ${reason}") }
-  publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', result)
+  if(!success) { planAnnouncementLog(plan, 'warn', "Playback restore for ${correlationId} was incomplete: ${reason}".toString()) }
+  plan.soap = null
+  ((List)plan.progress) << [correlationId: correlationId, phase: 'PLAYBACK_RESTORED', details: result]
 }
 
 
@@ -2408,25 +2508,23 @@ private void setLevelLocked(BigDecimal level, BigDecimal duration) {
     dispatchPlayerVolume(targetVolume)
     return
   }
-  // Rapid-call detection: if an external app (e.g. webCoRE) is managing the fade
-  // by calling setLevel(level, duration) in a loop, skip our internal fade and set volume directly
   String deviceId = getId()
   if(!deviceId) {
     dispatchPlayerVolume(targetVolume)
     return
   }
-  Long now = now()
-  Long lastCall = lastVolumeFadeCallTime.put(deviceId, now)
-  if(lastCall != null && (now - lastCall) < 2000) {
-    logDebug("Rapid setLevel calls detected (${now - lastCall}ms apart) — setting volume directly to ${targetVolume}")
-    cancelVolumeFade()
-    dispatchPlayerVolume(targetVolume)
-    return
-  }
-  Integer currentVolume = getPlayerVolume()
+  // A new fade always replaces the running one and ramps from the last volume that fade sent, because the
+  // cached volume attribute lags the commands in flight. With no fade running the live attribute is the start.
+  Map runningFade = volumeFadeState.get(deviceId)
+  Integer currentVolume = runningFade != null && runningFade.lastSentVolume != null ?
+    (runningFade.lastSentVolume as Integer) : getPlayerVolume()
   Integer delta = Math.abs(targetVolume - currentVolume)
   if(delta == 0) {
+    // For a grouped player lastSentVolume can be a queued step that never reached the speaker; cancelling
+    // would drop it, so send the target when a step is still waiting for its staggered flush.
+    Boolean unsent = pendingGroupedPlayerVolumes.containsKey(deviceId)
     cancelVolumeFade()
+    if(unsent) { dispatchPlayerVolume(targetVolume) }
     return
   }
   Integer durationSeconds = duration as Integer
@@ -2446,23 +2544,23 @@ private void setLevelLocked(BigDecimal level, BigDecimal duration) {
   BigDecimal volumeStep = (BigDecimal)(targetVolume - currentVolume) / steps
   // Cancel any existing fade and start new one. The device runs unlocked (singleThreaded: false), so fade
   // transitions are serialized on the fade map and every step carries the generation it was scheduled for.
-  synchronized(volumeLock(deviceId)) {
-    cancelVolumeFade()
-    // Hubitat's sandbox rejects System.nanoTime(); a UUID is unique per fade and needs no clock.
-    String generation = UUID.randomUUID().toString()
-    Map fadeState = [
-      targetVolume: targetVolume,
-      startVolume: currentVolume,
-      volumeStep: volumeStep,
-      currentStep: 0,
-      totalSteps: steps,
-      intervalMs: intervalMs,
-      generation: generation
-    ]
-    volumeFadeState.put(deviceId, fadeState)
-    logInfo("Starting volume fade from ${currentVolume} to ${targetVolume} over ${durationSeconds}s (${steps} steps, ${intervalMs}ms interval)")
-    runInMillis(intervalMs, 'volumeFadeStep', [overwrite: true, data: [generation: generation]])
-  }
+  // setLevel() already holds the per-player lock.
+  cancelVolumeFade()
+  // Hubitat's sandbox rejects System.nanoTime(); a UUID is unique per fade and needs no clock.
+  String generation = UUID.randomUUID().toString()
+  Map fadeState = [
+    targetVolume: targetVolume,
+    startVolume: currentVolume,
+    lastSentVolume: currentVolume,
+    volumeStep: volumeStep,
+    currentStep: 0,
+    totalSteps: steps,
+    intervalMs: intervalMs,
+    generation: generation
+  ]
+  volumeFadeState.put(deviceId, fadeState)
+  logInfo("Starting volume fade from ${currentVolume} to ${targetVolume} over ${durationSeconds}s (${steps} steps, ${intervalMs}ms interval)")
+  runInMillis(intervalMs, 'volumeFadeStep', [overwrite: true, data: [generation: generation]])
 }
 
 void volumeFadeStep(Map data = [:]) {
@@ -2480,7 +2578,6 @@ void volumeFadeStep(Map data = [:]) {
     if(currentStep >= totalSteps) {
       // Final step: set exact target volume and clean up
       volumeFadeState.remove(deviceId)
-      lastVolumeFadeCallTime.remove(deviceId)
       dispatchPlayerVolume(targetVolume)
       logInfo("Volume fade complete: volume set to ${targetVolume}")
       return
@@ -2491,6 +2588,8 @@ void volumeFadeStep(Map data = [:]) {
     newVolume = Math.max(0, Math.min(100, newVolume))
     Map updated = new LinkedHashMap(fadeState)
     updated.currentStep = currentStep
+    // Intended ramp position; for a grouped player the dispatch below may only queue it.
+    updated.lastSentVolume = newVolume
     if(!volumeFadeState.replace(deviceId, fadeState, updated)) { return }
     dispatchPlayerVolume(newVolume)
     Integer intervalMs = fadeState.intervalMs as Integer
@@ -3761,9 +3860,6 @@ void parse(String raw) {
     return
   }
   try {
-    // Stamp at notification entry, before header parsing, the timestamp update or any XML parsing, so a
-    // stalled older notification can never receive a higher sequence than a newer one.
-    Map notifyStamp = stampParentPayload([:])
     logDebug("UPnP NOTIFY parse entered; dni=${device?.getDeviceNetworkId() ?: 'unknown'}, payloadLength=${raw.length()}")
     LinkedHashMap message = getMapForRaw(raw)
     LinkedHashMap messageHeaders = (LinkedHashMap)message?.headers
@@ -3777,86 +3873,86 @@ void parse(String raw) {
       return
     }
     String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]?.toString()
-    String seqRaw = messageHeaders["SEQ"] ?: messageHeaders["X-SONOS-SEQ"]
-    Integer seq = null
-    if(seqRaw != null) {
-      try { seq = Integer.parseInt(seqRaw.toString().trim()) } catch(Exception ignored) { seq = null }
-    }
-    String seqDisplay = seq == null ? 'unset' : seq.toString()
-    String sid = messageHeaders["SID"]?.toString()?.trim() ?: null
-    if(sid == '') { sid = null }
-    logDebug("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, seq=${seqDisplay}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
+    logDebug("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
     if(serviceType == 'ZoneGroupTopology' || serviceType == 'AVTransport' || serviceType == 'ContentDirectory') {
-      logDebug("UPnP NOTIFY header values; serviceType=${serviceType ?: 'header-unset'}, seq=${seqDisplay}, headerValues=${renderHeaderValues(messageHeaders)}")
+      logDebug("UPnP NOTIFY header values; serviceType=${serviceType}, headerValues=${renderHeaderValues(messageHeaders)}")
     }
-    // Header switch: serviceType is the sole dispatch for all UPnP services
-    if(serviceType != null) {
-      switch(serviceType) {
-        case 'ZoneGroupTopology':
-          try {
-            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ZGT event payload'); return }
-            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
-            Map<String, Object> payload = zgtParse(xmlBody)
-            if(payload == null) { return }
-            sendZgtToParent(payload, notifyStamp)
-          } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
-          return
-        case 'AVTransport':
-          try {
-            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML AVT event payload'); return }
-            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
-            handleAvtNotification(xmlBody, notifyStamp)
-          } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
-          return
-        case 'RenderingControl':
-          try {
-            logDebug('RenderingControl event processing beginning')
-            setLastInboundMrRcEvent()
-            String rcDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML RC event payload'); return }
-            logUpnpXmlAtTrace(serviceType, rcDni, xmlBody)
-            processRenderingControlPayload(xmlBody, notifyStamp)
-            logDebug('RenderingControl event processing completed')
-          } catch (Exception e) { logException('RenderingControl event processing failed', e) }
-          return
-        case 'GroupRenderingControl':
-          try {
-            setLastInboundMrGrcEvent()
-            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML GRC event payload'); return }
-            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
-            handleGrcNotification(xmlBody)
-          } catch(Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
-          return
-        case 'HTControl':
-          try {
-            setLastInboundHtControlEvent()
-            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML HTControl event payload'); return }
-            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
-            handleHtControlPayload(xmlBody)
-          } catch(Exception e) { logWarn("Ran into an issue parsing HTControl: ${e}") }
-          return
-        case 'AlarmClock':
-          try {
-            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML AlarmClock event payload'); return }
-            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
-            Map<String, String> alarmClockValues = parseAlarmClockPayload(xmlBody)
-            if(alarmClockValues.isEmpty()) { logDebug('Ignoring AlarmClock event without documented fields'); return }
-            sendUpnpEventsToParent([service: 'AlarmClock', sourceDni: device.getDeviceNetworkId()?.toString(),
-                values: alarmClockValues])
-          } catch(Exception e) { logWarn("Ran into an issue parsing AlarmClock: ${e}") }
-          return
-        case 'ContentDirectory':
-          try {
-            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ContentDirectory event payload'); return }
-            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
-            handleContentDirectoryPayload(xmlBody)
-          } catch(Exception e) { logWarn("Ran into an issue parsing ContentDirectory: ${e}") }
-          return
-      }
+    if(serviceType == null || !NOTIFY_SERVICE_LABELS.containsKey(serviceType)) {
+      logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
+          "Could not determine service type for message: ${message}")
+      return
     }
-    logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
-        "Could not determine service type for message: ${message}")
+    // Stamp once the notification is accepted (known service, headers and body present) but before any XML
+    // parsing, so a stalled older notification can never receive a higher sequence than a newer one, and
+    // ignored notifications do not burn sequence numbers.
+    Map notifyStamp = stampParentPayload([:])
+    handleNotifyService(serviceType, xmlBody, notifyStamp)
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
+}
+
+/** Display label per UPnP service type handled by {@link #handleNotifyService}. */
+@Field static final Map<String, String> NOTIFY_SERVICE_LABELS = [
+  ZoneGroupTopology: 'ZGT', AVTransport: 'AVT', RenderingControl: 'RC', GroupRenderingControl: 'GRC',
+  HTControl: 'HTControl', AlarmClock: 'AlarmClock', ContentDirectory: 'ContentDirectory'
+].asImmutable()
+
+/**
+ * Common NOTIFY handler wrapper: inbound-event bookkeeping, plausibility check, trace log, dispatch, and one
+ * consistent failure log that keeps the stack trace.
+ */
+@CompileStatic
+void handleNotifyService(String serviceType, String xmlBody, Map stamp) {
+  String label = NOTIFY_SERVICE_LABELS[serviceType] ?: serviceType
+  try {
+    markNotifyInbound(serviceType)
+    if(!isPlausibleXmlPayload(xmlBody)) { logDebug("Ignoring blank or non-XML ${label} event payload"); return }
+    logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
+    dispatchNotifyService(serviceType, xmlBody, stamp)
+  } catch(Exception e) { logException("UPnP ${label} NOTIFY processing failed", e) }
+}
+
+@CompileStatic
+void markNotifyInbound(String serviceType) {
+  switch(serviceType) {
+    case 'RenderingControl': setLastInboundMrRcEvent(); break
+    case 'GroupRenderingControl': setLastInboundMrGrcEvent(); break
+    case 'HTControl': setLastInboundHtControlEvent(); break
+    default: break
+  }
+}
+
+/** Route a plausible NOTIFY body to its service handler. Every handler that forwards to the parent gets the stamp. */
+@CompileStatic
+void dispatchNotifyService(String serviceType, String xmlBody, Map stamp) {
+  switch(serviceType) {
+    case 'ZoneGroupTopology':
+      Map<String, Object> payload = zgtParse(xmlBody)
+      if(payload != null) { sendZgtToParent(payload, stamp) }
+      break
+    case 'AVTransport':
+      handleAvtNotification(xmlBody, stamp)
+      break
+    case 'RenderingControl':
+      processRenderingControlPayload(xmlBody, stamp)
+      break
+    case 'GroupRenderingControl':
+      handleGrcNotification(xmlBody, stamp)
+      break
+    case 'HTControl':
+      handleHtControlPayload(xmlBody)
+      break
+    case 'AlarmClock':
+      Map<String, String> alarmClockValues = parseAlarmClockPayload(xmlBody)
+      if(alarmClockValues.isEmpty()) { logDebug('Ignoring AlarmClock event without documented fields'); break }
+      sendUpnpEventsToParent([service: 'AlarmClock', sourceDni: device.getDeviceNetworkId()?.toString(),
+          values: alarmClockValues], stamp)
+      break
+    case 'ContentDirectory':
+      handleContentDirectoryPayload(xmlBody)
+      break
+    default:
+      break
+  }
 }
 
 /**
@@ -3937,9 +4033,15 @@ void sendZgtToParent(Map<String, Object> payload, Map observedStamp = null) {
 }
 
 /** Send parsed AlarmClock/AlarmRunning data straight to the parent app. */
-void sendUpnpEventsToParent(Map payload) {
+void sendUpnpEventsToParent(Map payload, Map observedStamp = null) {
   if(payload == null || parent == null) { return }
-  Map stamped = stampParentPayload(new LinkedHashMap(payload))
+  Map stamped = new LinkedHashMap(payload)
+  if(observedStamp != null) {
+    stamped.put('epoch', observedStamp.epoch)
+    stamped.put('sequence', observedStamp.sequence)
+  } else {
+    stampParentPayload(stamped)
+  }
   try {
     parent.putPlayerUpnpEvents(stamped)
   } catch(Exception e) {
@@ -4377,14 +4479,14 @@ List<Map> buildGrcEvents(Map<String, Object> snapshot) {
   return events
 }
 
-void handleGrcNotification(String xmlBody) {
+void handleGrcNotification(String xmlBody, Map observedStamp = null) {
   Map<String, Object> snapshot = parseGrcFullSnapshot(xmlBody)
   if(snapshot == null) { return }
   Map args = [:]
   buildGrcEvents(snapshot).each { Map event ->
     if(event?.name && event.containsKey('value')) { args[event.name.toString()] = event.value }
   }
-  if(!args.isEmpty()) { sendParentAppRequest('groupRendering', args) }
+  if(!args.isEmpty()) { sendParentAppRequest('groupRendering', args, observedStamp) }
 }
 
 void handleAvtNotification(String xmlBody, Map observedStamp = null) {
@@ -4906,11 +5008,6 @@ String getGroupMuteState() {
 // =============================================================================
 // UPnP Subscriptions and Resubscriptions
 // =============================================================================
-  // sonosEventSubscribe('/MediaRenderer/Queue/Event', host, RESUB_INTERVAL, dni)
-  // sonosEventSubscribe('/MediaServer/ContentDirectory/Event', host, RESUB_INTERVAL, dni)
-  // sonosEventSubscribe('/MusicServices/Event', host, RESUB_INTERVAL, dni)
-  // sonosEventSubscribe('/SystemProperties/Event', host, RESUB_INTERVAL, dni)
-  // sonosEventSubscribe('/AlarmClock/Event', host, RESUB_INTERVAL, dni)
 
 String getDNI() {return device.getDeviceNetworkId()}
 Boolean hasSid(String sid) {
@@ -4953,30 +5050,45 @@ void deleteSid(String sid) {
   String expiryDataKey = subscriptionExpiryDataKey(sid)
   device.removeDataValue(sidDataKey)
   device.removeDataValue(expiryDataKey)
-  // Clean up in-memory expiry
-  String expiryKey = "${getDeviceDNI()}-${sid}-expires"
-  eventTimestamps.remove(expiryKey)
+  clearSubscriptionExpiry(sid)
   if(sid == 'zgt') {
     // Remove the previous persisted epoch value; the formatted expiry is retained separately.
     device.removeDataValue('zgtSubExpiresEpoch')
   }
 }
 @CompileStatic
+String subscriptionExpiryMapKey(String subscriptionKey) {
+  return "${getDeviceDNI()}-${subscriptionKey}".toString()
+}
+@CompileStatic
+Long getSubscriptionExpiry(String subscriptionKey) {
+  return subscriptionExpiryEpochs.get(subscriptionExpiryMapKey(subscriptionKey))
+}
+@CompileStatic
+void setSubscriptionExpiry(String subscriptionKey, Long expiresEpoch) {
+  subscriptionExpiryEpochs.put(subscriptionExpiryMapKey(subscriptionKey), expiresEpoch)
+}
+@CompileStatic
+void clearSubscriptionExpiry(String subscriptionKey) {
+  subscriptionExpiryEpochs.remove(subscriptionExpiryMapKey(subscriptionKey))
+}
+@CompileStatic
 Boolean subValid(String sid) {
-  String expiryKey = "${getDeviceDNI()}-${sid}-expires"
-  Long exp = eventTimestamps.get(expiryKey)
-  if(exp == null) { return false }
+  Long exp = getSubscriptionExpiry(sid)
+  if(exp == null) {
+    // Expiry is memory-only; after a reboot or code save a persisted SID has no known lease, so renew now.
+    if(hasSid(sid)) { logDebug("Subscription ${sid} has a SID but no known expiry; renewing") }
+    return false
+  }
   long nowEpoch = Instant.now().getEpochSecond()
   long renewalSafetyEpoch = nowEpoch + UPNP_SUBSCRIPTION_EXPIRY_SAFETY_SECONDS.longValue()
   return exp.longValue() > renewalSafetyEpoch && hasSid(sid)
 }
 @CompileStatic
 void updateSid(String sid, Map headers, Long grantedTimeout = null) {
-  long expiresEpochValue = Instant.now().getEpochSecond() + (grantedTimeout != null ? grantedTimeout.longValue() : (2L * RESUB_INTERVAL.longValue()))
+  long expiresEpochValue = Instant.now().getEpochSecond() + effectiveLeaseSeconds(grantedTimeout)
   Long expiresEpoch = Long.valueOf(expiresEpochValue)
-  // Store expiry in-memory for subValid() checks
-  String expiryKey = "${getDeviceDNI()}-${sid}-expires"
-  eventTimestamps.put(expiryKey, expiresEpoch)
+  setSubscriptionExpiry(sid, expiresEpoch)
   // Write human-readable expiry to device data for visibility
   String formatted = formatEpoch(expiresEpoch)
   String expiryDataKey = subscriptionExpiryDataKey(sid)
@@ -4994,8 +5106,7 @@ void scheduleResubscriptionToEvents(String eventsToResub, Long grantedTimeout = 
   // avoids needlessly opening a new socket every hour. Stagger players so
   // their renewals do not all contend for the hub at once.
   Integer jitterSeconds = getDeviceResubJitterSeconds()
-  Long leaseSeconds = grantedTimeout != null && grantedTimeout.longValue() > 0L
-      ? grantedTimeout.longValue() : 2L * RESUB_INTERVAL.longValue()
+  Long leaseSeconds = effectiveLeaseSeconds(grantedTimeout)
   Integer renewalDelay = Math.max(30, (int)Math.floor(leaseSeconds.doubleValue() * UPNP_RENEWAL_PERCENT.doubleValue() / 100.0d) - jitterSeconds)
   runIn(renewalDelay, eventsToResub, [overwrite: true])
   clearSubscriptionRetryAttempts(eventsToResub)
@@ -5366,11 +5477,22 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
   }
 }
 
+// The only lease a speaker is known to have granted is the one we requested
+// (RESUB_INTERVAL); use it whenever the grant is missing or unusable.
+@CompileStatic
+static Long effectiveLeaseSeconds(Long grantedTimeout) {
+  if(grantedTimeout != null && grantedTimeout.longValue() > 0L) { return grantedTimeout }
+  return Long.valueOf(RESUB_INTERVAL.longValue())
+}
+
 Long parseGrantedTimeout(String value) {
-  if(!value) { return 2L * RESUB_INTERVAL }
+  if(!value) { return effectiveLeaseSeconds(null) }
+  // "Second-infinite" promises no expiry, but keep renewing on the requested
+  // interval so a silently dead subscription is still noticed.
+  if(value.trim().toLowerCase().contains('infinite')) { return effectiveLeaseSeconds(null) }
   java.util.regex.Matcher matcher = java.util.regex.Pattern.compile('(?i)second-(\\d+)').matcher(value)
   if(matcher.find()) { return Math.max(60L, Long.parseLong(matcher.group(1))) }
-  return 2L * RESUB_INTERVAL
+  return effectiveLeaseSeconds(null)
 }
 
 void completeUpnpWithoutResponse(Map entry, Map request, String reason) {
@@ -7258,9 +7380,49 @@ void playerSkipToPreviousTrack() {
   enqueueTransportCommand('skipToPreviousTrack')
 }
 
+/** Monotonic play-mode command counter; deferred loads capture it so a newer explicit command wins. */
 @CompileStatic
-void playerSetPlayModes(Map playModes) {
+Long currentPlayModeSequence() {
+  synchronized(getRuntimeState()) {
+    Object value = getRuntimeState().get('playModeSequence')
+    return value instanceof Number ? ((Number)value).longValue() : 0L
+  }
+}
+
+/**
+ * Explicit commands (requestedAt == null) stamp their fields with a new sequence. A deferred write carries the
+ * sequence captured when it was requested and drops any field an explicit command stamped afterwards.
+ */
+@CompileStatic
+private Map<String, Boolean> resolvePlayModeOrdering(Map<String, Boolean> playModes, Long requestedAt) {
+  Map<String, Boolean> effective = new LinkedHashMap<String, Boolean>(playModes)
+  synchronized(getRuntimeState()) {
+    Object existing = getRuntimeState().get('playModeStamps')
+    Map<String, Long> stamps = existing instanceof Map
+        ? new LinkedHashMap<String, Long>((Map<String, Long>)existing) : new LinkedHashMap<String, Long>()
+    if(requestedAt == null) {
+      Long next = currentPlayModeSequence() + 1L
+      getRuntimeState().put('playModeSequence', next)
+      effective.keySet().each { String field -> stamps.put(field, next) }
+      getRuntimeState().put('playModeStamps', stamps)
+    } else {
+      new ArrayList<String>(effective.keySet()).each { String field ->
+        Long stamp = stamps.get(field)
+        if(stamp != null && stamp > requestedAt) { effective.remove(field) }
+      }
+    }
+  }
+  return effective
+}
+
+@CompileStatic
+void playerSetPlayModes(Map playModes, Long requestedAt = null) {
   if(!(playModes instanceof Map) || playModes.isEmpty()) { return }
+  playModes = resolvePlayModeOrdering((Map<String, Boolean>)playModes, requestedAt)
+  if(playModes.isEmpty()) {
+    logDebug('Dropping deferred play-mode write; a newer play-mode command superseded it')
+    return
+  }
   String host = getLocalUpnpHostForGroupOperation()
   if(!host) { logWarn('Cannot set Sonos play modes: local UPnP host is unavailable'); return }
   Boolean repeat = playModes.containsKey('repeat') ? playModes.repeat as Boolean : getCurrentRepeatAllMode() == 'on'
@@ -7577,7 +7739,8 @@ private void playerLoadFavoriteCommand(String favoriteId, String action, Boolean
   if(playOnCompletion == true) { invalidateGroupAnnouncementStream('FAVORITE_LOAD_REQUESTED') }
   Map<String, Boolean> playModes = buildRequestedPlayModes(repeat, repeatOne, shuffle, crossfade)
   Map request = [favoriteId: favoriteId, action: action, playModes: playModes,
-      playOnCompletion: playOnCompletion, groupId: groupId, attempts: 0]
+      playOnCompletion: playOnCompletion, groupId: groupId, attempts: 0,
+      playModeRequestedAt: currentPlayModeSequence()]
   loadFavoriteOverUpnp(request)
 
   // UPnP SetAVTransportURI is followed by Play only after the SOAP action succeeds.
@@ -7615,7 +7778,6 @@ void loadFavoriteOverUpnp(Map request) {
   if(!host) { logWarn("Cannot load favorite ${favoriteId}: local UPnP host is unavailable"); return }
   Map<String, Boolean> playModes = request.playModes instanceof Map
       ? (Map<String, Boolean>)request.playModes : [:]
-  if(!playModes.isEmpty()) { playerSetPlayModes(playModes) }
   Map params
   if(action == 'REPLACE') {
     params = getSoapActionParams(host, AVTransport, 'SetAVTransportURI',
@@ -7630,7 +7792,9 @@ void loadFavoriteOverUpnp(Map request) {
   logInfo("Loading Sonos favorite ${favoriteId} (${favorite.name ?: 'unnamed'}) through UPnP; action=${action}")
   try {
     postSonosSoapAsync('favoriteLoadSoapCallback', params, [requestId: requestId,
-        favoriteId: favoriteId, action: action, playOnCompletion: request.playOnCompletion == true])
+        favoriteId: favoriteId, action: action, playModes: playModes,
+        playModeRequestedAt: request.playModeRequestedAt,
+        playOnCompletion: request.playOnCompletion == true])
   } catch(Exception e) {
     runtimeState.remove('favoriteLoadRequestId')
     logWarn("Could not send UPnP load for favorite ${favoriteId}: ${e.message}")
@@ -7645,6 +7809,10 @@ void favoriteLoadSoapCallback(AsyncResponse response, Map data = null) {
     return
   }
   logInfo("Sonos accepted UPnP load of favorite ${data?.favoriteId}")
+  // Apply play modes only after the new source loads; radio and similar sources reject them (UPnP 712).
+  if(data?.playModes instanceof Map && !((Map)data.playModes).isEmpty()) {
+    playerSetPlayModes((Map)data.playModes, data.playModeRequestedAt as Long)
+  }
   if(data?.playOnCompletion == true) { playerPlay() }
 }
 
@@ -7660,7 +7828,8 @@ void playerLoadPlaylist(String playlistId, String action, Boolean repeat, Boolea
   if(playOnCompletion == true) { invalidateGroupAnnouncementStream('PLAYLIST_LOAD_REQUESTED') }
   Map<String, Boolean> playModes = buildRequestedPlayModes(repeat, repeatOne, shuffle, crossfade)
   loadPlaylistOverUpnp([playlistId: playlistId, action: action, playModes: playModes,
-      playOnCompletion: playOnCompletion, attempts: 0])
+      playOnCompletion: playOnCompletion, attempts: 0,
+      playModeRequestedAt: currentPlayModeSequence()])
 
 }
 
@@ -7695,7 +7864,6 @@ void loadPlaylistOverUpnp(Map request) {
   if(!host) { reportPlaylistLoadError(playlistId, 'ERROR_OFFLINE', 'Local UPnP host is unavailable.'); return }
   Map<String, Boolean> playModes = request.playModes instanceof Map
       ? (Map<String, Boolean>)request.playModes : [:]
-  if(!playModes.isEmpty()) { playerSetPlayModes(playModes) }
   Map params = action == 'REPLACE'
       ? getSoapActionParams(host, AVTransport, 'SetAVTransportURI', [CurrentURI: uri, CurrentURIMetaData: metadata])
       : getSoapActionParams(host, AVTransport, 'AddURIToQueue', [EnqueuedURI: uri,
@@ -7704,7 +7872,9 @@ void loadPlaylistOverUpnp(Map request) {
   String requestId = UUID.randomUUID().toString()
   runtimeState.playlistLoadRequestId = requestId
   postSonosSoapAsync('playlistLoadSoapCallback', params, [requestId: requestId,
-      playlistId: playlistId, action: action, playOnCompletion: request.playOnCompletion == true])
+      playlistId: playlistId, action: action, playModes: playModes,
+      playModeRequestedAt: request.playModeRequestedAt,
+      playOnCompletion: request.playOnCompletion == true])
 }
 
 void playlistLoadSoapCallback(AsyncResponse response, Map data = null) {
@@ -7714,6 +7884,9 @@ void playlistLoadSoapCallback(AsyncResponse response, Map data = null) {
     reportPlaylistLoadError(data?.playlistId?.toString(), 'UPNP_LOAD_FAILED',
         "UPnP load failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
     return
+  }
+  if(data?.playModes instanceof Map && !((Map)data.playModes).isEmpty()) {
+    playerSetPlayModes((Map)data.playModes, data.playModeRequestedAt as Long)
   }
   if(data?.playOnCompletion == true) { playerPlay() }
 }
@@ -8042,6 +8215,12 @@ void componentSetBassLocal(DeviceWrapper device, BigDecimal level) {
 
 void localControlCallback(AsyncResponse response, Map data) {
   if (response?.status != 200 || response.hasError()) {
+    String upnpErrorData = ''
+    try { upnpErrorData = response.getErrorData()?.toString() ?: '' } catch(Exception ignored) { upnpErrorData = '' }
+    if(response?.status == 500 && upnpErrorData.contains('712')) {
+      logDebug('Sonos rejected a play mode for the current source (UPnP 712 play mode not supported)')
+      return
+    }
     logError("Request returned HTTP status ${response.status}")
     logError("Request error message: ${response.getErrorMessage()}")
     try{logError("Request ErrorData: ${response.getErrorData()}")} catch(Exception e){}
@@ -8180,62 +8359,78 @@ void componentPlayTextWithRestoreLocal(String text, BigDecimal volume = null, St
 }
 
 void componentPlayStreamWithRestoreLocal(String streamUrl, Integer duration, BigDecimal volume = null) {
-  synchronized(getRuntimeState()) {
-    if(!streamUrl) { logWarn('TTS did not return a stream URI'); return }
+  if(!streamUrl) { logWarn('TTS did not return a stream URI'); return }
+  String correlationId = UUID.randomUUID().toString()
+  Integer previousGroupVolume = getGroupVolumeState()
+  if(previousGroupVolume == null) { previousGroupVolume = getPlayerVolume() }
+  volume = resolveExplicitVolumeSentinel(volume)
+  Integer announcementVolume = volume as Integer
+  Boolean hasSnapshot = false
+  synchronized(announcementLock()) {
     Map snapshot = getLastTransportPlaybackSnapshot()
-    String correlationId = UUID.randomUUID().toString()
-    Integer previousGroupVolume = getGroupVolumeState()
-    if(previousGroupVolume == null) { previousGroupVolume = getPlayerVolume() }
-    volume = resolveExplicitVolumeSentinel(volume)
-    Integer announcementVolume = volume as Integer
     runtimeState.remove('announcementPlaybackRestore')
     if(snapshot != null) {
+      hasSnapshot = true
       snapshot.correlationId = correlationId
       snapshot.announcementUri = streamUrl
       snapshot.previousGroupVolume = previousGroupVolume
       snapshot.announcementVolume = announcementVolume
       runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] = snapshot
-      runtimeState.directStreamTtsRestore = [correlationId: correlationId, streamUri: streamUrl,
-        duration: duration, previousGroupVolume: previousGroupVolume,
-        announcementVolume: announcementVolume]
-    } else {
-      logWarn("No AVTransport snapshot is available to restore after direct stream TTS ${correlationId}")
-      runtimeState.directStreamTtsRestore = [correlationId: correlationId, streamUri: streamUrl,
-        duration: duration, previousGroupVolume: previousGroupVolume,
-        announcementVolume: announcementVolume]
     }
-    if(volume != null) { componentSetGroupLevelLocal(volume) }
-    setAVTransportURIAndPlay(streamUrl)
-    runIn(Math.max(duration + 2, 5), 'restoreDirectStreamTts', [overwrite: true,
+    runtimeState.directStreamTtsRestore = [correlationId: correlationId, streamUri: streamUrl,
+      duration: duration, previousGroupVolume: previousGroupVolume,
+      announcementVolume: announcementVolume]
+  }
+  if(!hasSnapshot) {
+    logWarn("No AVTransport snapshot is available to restore after direct stream TTS ${correlationId}")
+  }
+  if(volume != null) { componentSetGroupLevelLocal(volume) }
+  setAVTransportURIAndPlay(streamUrl)
+  // Every start schedules its own timer (overwrite: false) carrying its correlation ID. A start that paused
+  // after releasing the lock can then neither replace a newer start's timer nor schedule one it no longer
+  // owns; a stale timer fails the correlation check in restoreDirectStreamTts.
+  Boolean owner
+  synchronized(announcementLock()) {
+    owner = runtimeState.directStreamTtsRestore instanceof Map &&
+        ((Map)runtimeState.directStreamTtsRestore).correlationId?.toString() == correlationId
+  }
+  if(owner) {
+    runIn(Math.max(duration + 2, 5), 'restoreDirectStreamTts', [overwrite: false,
       data: [correlationId: correlationId]])
   }
 }
 
 void restoreDirectStreamTts(Map data = null) {
-  synchronized(getRuntimeState()) {
-    String correlationId = data?.correlationId?.toString()
+  String correlationId = data?.correlationId?.toString()
+  Map volumeRestore = null
+  Boolean restorePlayback = false
+  Boolean tookOver = false
+  synchronized(announcementLock()) {
     Map active = runtimeState.directStreamTtsRestore instanceof Map
         ? (Map)runtimeState.directStreamTtsRestore : null
     if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
     String currentSource = device.currentValue('audioSource')?.toString()
-    if(currentSource && currentSource != active.streamUri?.toString()) {
-      if(!(runtimeState.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING'])) {
-        restoreTemporaryAnnouncementVolume(correlationId, active.previousGroupVolume as Integer,
-            active.announcementVolume as Integer)
-        runtimeState.remove('directStreamTtsRestore')
-        restoreGroupAnnouncementPlayback(correlationId)
-        return
-      }
-      logInfo("Skipping direct TTS playback restore ${correlationId}; another source took over")
-      runtimeState.remove('directStreamTtsRestore')
+    Boolean otherSourcePlaying = currentSource && currentSource != active.streamUri?.toString() &&
+        runtimeState.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']
+    runtimeState.remove('directStreamTtsRestore')
+    if(otherSourcePlaying) {
+      tookOver = true
       if(runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY]?.correlationId == correlationId) {
         runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
       }
-      return
+    } else {
+      restorePlayback = true
+      volumeRestore = [previousVolume: active.previousGroupVolume as Integer,
+          announcementVolume: active.announcementVolume as Integer]
     }
-    restoreTemporaryAnnouncementVolume(correlationId, active.previousGroupVolume as Integer,
-        active.announcementVolume as Integer)
-    runtimeState.remove('directStreamTtsRestore')
+  }
+  if(tookOver) {
+    logInfo("Skipping direct TTS playback restore ${correlationId}; another source took over")
+    return
+  }
+  if(restorePlayback) {
+    restoreTemporaryAnnouncementVolume(correlationId, volumeRestore.previousVolume as Integer,
+        volumeRestore.announcementVolume as Integer)
     restoreGroupAnnouncementPlayback(correlationId)
   }
 }
@@ -8288,19 +8483,22 @@ void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = nul
 
 void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
   localControlCallback(response, data)
-  // Hubitat can run a command and an HTTP callback concurrently. Keep ownership
-  // validation and the resulting play enqueue atomic with transport commands.
-  synchronized(getRuntimeState()) {
+  Map plan = newAnnouncementPlan()
+  synchronized(announcementLock()) {
     String guid = data?.streamTransportIntentGuid?.toString()
-    String latestGuid = runtimeState.streamTransportIntentGuid?.toString()
-    Boolean current = guid != null && guid == latestGuid
+    String latestGuid
+    Boolean current
+    // Consume the intent even on failure, so duplicate callbacks cannot replay it.
+    synchronized(getRuntimeState()) {
+      latestGuid = runtimeState.streamTransportIntentGuid?.toString()
+      current = guid != null && guid == latestGuid
+      if(current) { runtimeState.remove('streamTransportIntentGuid') }
+    }
     logDebug("Stream load callback guid=${guid} latestGuid=${latestGuid} status=${response?.status} current=${current}")
     if(!current) {
       logDebug("Ignoring superseded stream load callback guid=${guid}")
       return
     }
-    // Consume the intent even on failure, so duplicate callbacks cannot replay it.
-    runtimeState.remove('streamTransportIntentGuid')
     String announcementGuid = data?.groupAnnouncementCorrelationId?.toString()
     Map announcement = runtimeState.groupAnnouncementStream instanceof Map
         ? (Map)runtimeState.groupAnnouncementStream : null
@@ -8313,22 +8511,44 @@ void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
       if(restore != null && !announcementGuid && data?.streamUri &&
           data.streamUri != restore.snapshot?.announcementUri &&
           getCurrentAnnouncementRestore(restore.correlationId?.toString()) != null) {
-        completeAnnouncementPlaybackRestore(restore.correlationId?.toString(), false, 'external-playback')
+        planCompleteAnnouncementRestore(plan, restore.correlationId?.toString(), false, 'external-playback')
       }
-      commitPendingGroupAnnouncementTakeover(guid)
+      planCommitPendingGroupAnnouncementTakeover(plan, guid)
       if(announcementGuid) { announcement.phase = 'STARTING' }
-      play()
+      plan.play = true
     } else if(announcementGuid) {
       announcement.phase = 'FAILED'
-      publishGroupAnnouncementProgress(announcementGuid, 'FAILED')
+      ((List)plan.progress) << [correlationId: announcementGuid, phase: 'FAILED', details: null]
       runtimeState.remove('groupAnnouncementStream')
     } else {
-      clearPendingGroupAnnouncementTakeover(guid, "SET_AV_TRANSPORT_URI_REJECTED status=${response?.status}")
+      clearPendingGroupAnnouncementTakeover(guid, "SET_AV_TRANSPORT_URI_REJECTED status=${response?.status}".toString())
     }
+  }
+  executeAnnouncementPlan(plan)
+  if(plan.play == true) { enqueuePlayIfIntentCurrent(data?.streamTransportIntentGuid?.toString()) }
+}
+
+/**
+ * Queue the post-load Play only while no newer transport command exists. The check and the local enqueue are
+ * one critical section on the runtime lock, so a Stop enqueued in between cannot be removed by this Play.
+ * Parent calls (grouped routing) stay outside the lock.
+ */
+void enqueuePlayIfIntentCurrent(String loadGuid) {
+  if(!isStreamTransportIntentUnclaimed()) { return }
+  // Parent routing is outside the lock; only the local enqueue needs to be atomic with the intent check.
+  if(deferCommandToParentDuringGroupOperation('play')) { return }
+  if(routeGroupedPlaybackCommandToCoordinator('play')) { return }
+  synchronized(getRuntimeState()) {
+    if(runtimeState.streamTransportIntentGuid == null) { enqueueTransportCommand('play') }
   }
 }
 
-void commitPendingGroupAnnouncementTakeover(String transportGuid) {
+Boolean isStreamTransportIntentUnclaimed() {
+  synchronized(getRuntimeState()) { return runtimeState.streamTransportIntentGuid == null }
+}
+
+/** Under the announcement lock: drop the staged takeover and queue its INTERRUPTED progress for the parent. */
+void planCommitPendingGroupAnnouncementTakeover(Map plan, String transportGuid) {
   Map pending = runtimeState.pendingGroupAnnouncementTakeover instanceof Map
       ? (Map)runtimeState.pendingGroupAnnouncementTakeover : null
   if(pending == null || pending.transportGuid?.toString() != transportGuid) { return }
@@ -8336,17 +8556,18 @@ void commitPendingGroupAnnouncementTakeover(String transportGuid) {
   Map announcement = runtimeState.groupAnnouncementStream instanceof Map
       ? (Map)runtimeState.groupAnnouncementStream : null
   if(announcement?.correlationId?.toString() != pending.correlationId?.toString()) {
-    logDebug("Ignoring transport takeover ${transportGuid}; announcement ownership changed before Sonos accepted the URI")
+    planAnnouncementLog(plan, 'debug', "Ignoring transport takeover ${transportGuid}; announcement ownership changed before Sonos accepted the URI".toString())
     return
   }
   String correlationId = pending.correlationId?.toString()
-  logDebug("Sonos accepted replacement stream for group announcement ${correlationId}; notifying parent app")
-  publishGroupAnnouncementProgress(correlationId, 'INTERRUPTED', [
+  planAnnouncementLog(plan, 'debug', "Sonos accepted replacement stream for group announcement ${correlationId}; notifying parent app".toString())
+  // A restore-complete in the same plan already owns the progress slot; INTERRUPTED takes precedence.
+  ((List)plan.progress) << [correlationId: correlationId, phase: 'INTERRUPTED', details: [
     externalPlayback: true,
     replacementUri: pending.replacementUri?.toString(),
     playbackState: runtimeState.playbackState?.toString(),
     sourceUri: device.currentValue('audioSource')?.toString()
-  ])
+  ]]
   runtimeState.remove('groupAnnouncementStream')
   runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
 }
