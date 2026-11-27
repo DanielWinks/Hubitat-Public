@@ -275,7 +275,7 @@ class SonosAdvPlayerSpec extends Specification {
   def "ContentDirectory renewal is issued without favorites or playlist child devices"() {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.50'
-    driver.device.dataValues.contentDirectorySubscriptionId = 'uuid:cd-sid'
+    driver.setSid('contentDirectory', 'uuid:cd-sid')
     driver.subscriptionExpiryEpochs.put("${driver.getDeviceDNI()}-contentDirectory".toString(), (System.currentTimeMillis() / 1000 as long) + 3600L)
 
     when:
@@ -286,32 +286,95 @@ class SonosAdvPlayerSpec extends Specification {
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.operation == 'renew'
   }
 
-  def "ContentDirectory subscription stores its SID under descriptive device data keys"() {
-    expect:
-    driver.subscriptionIdDataKey('contentDirectory') == 'contentDirectorySubscriptionId'
-    driver.subscriptionExpiryDataKey('contentDirectory') == 'contentDirectorySubscriptionExpires'
-
+  def "holding a SID or lease changes memory only; mirroring writes it to device data and releasing removes it"() {
     when:
     driver.setSid('contentDirectory', 'uuid:new')
+    driver.updateSid('zgt', [SID: 'uuid:zgt-test'], 1800L)
+    driver.updateSid('avTransport', [SID: 'uuid:avt-test'], 1800L)
 
     then:
-    driver.device.dataValues.contentDirectorySubscriptionId == 'uuid:new'
-    !driver.device.dataValues.containsKey('sid6')
-  }
-
-  def "legacy sid6 ContentDirectory values are migrated and removed during initialization cleanup"() {
-    given:
-    driver.device.dataValues.deviceIp = '192.168.1.50'
-    driver.device.dataValues.sid6 = 'uuid:legacy'
-    driver.device.dataValues['sid6-expires'] = 'Thu Nov 26 2026'
+    driver.getSid('zgt') == 'uuid:zgt-test'
+    driver.getSubscriptionExpiry('avTransport') != null
+    !driver.device.dataValues.keySet().any { String key -> key in ['contentDirectorySubscriptionId', 'zgtSub', 'avTransport'] }
 
     when:
-    driver.migrateLegacyContentDirectorySubscription()
+    ['contentDirectory', 'zgt', 'avTransport'].each { String key -> driver.mirrorSubscriptionToDeviceData(key) }
+
+    then: 'each subscription has its own established data key names'
+    driver.device.dataValues.contentDirectorySubscriptionId == 'uuid:new'
+    !driver.device.dataValues.containsKey('contentDirectorySubscriptionExpires')
+    driver.device.dataValues.zgtSub == 'uuid:zgt-test'
+    driver.device.dataValues.zgtSubExpires != null
+    driver.device.dataValues.avTransport == 'uuid:avt-test'
+    driver.device.dataValues['avTransport-expires'] != null
+    !driver.device.dataValues.containsKey('sid6')
+
+    when:
+    driver.deleteSid('zgt')
 
     then:
-    driver.device.dataValues.contentDirectorySubscriptionId == 'uuid:legacy'
-    !driver.device.dataValues.containsKey('sid6')
-    !driver.device.dataValues.containsKey('sid6-expires')
+    driver.getSid('zgt') == null
+    driver.getSubscriptionExpiry('zgt') == null
+    !driver.device.dataValues.containsKey('zgtSub')
+    !driver.device.dataValues.containsKey('zgtSubExpires')
+    driver.device.dataValues.avTransport == 'uuid:avt-test'
+  }
+
+  def "every inbound NOTIFY of a held subscription rewrites its SID and expiry to device data"() {
+    given:
+    String body = avtBody('<TransportState val="PLAYING"/>')
+    driver.updateSid('avTransport', [SID: 'uuid:avt'], 1800L)
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['NOTIFY /avt/x HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'AVTransport', 'SID': 'uuid:avt', 'SEQ': '1'], body: body]
+    }
+    driver.metaClass.getParent = { -> new Expando(putAvtEvents: { String dni, List<Map> events, Object epoch, Object sequence -> }) }
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt/x HTTP/1.1\r\nX-SONOS-SERVICETYPE: AVTransport\r\n\r\n' + body
+
+    when:
+    driver.parse(raw)
+
+    then:
+    driver.device.dataValues.avTransport == 'uuid:avt'
+    driver.device.dataValues['avTransport-expires'] == driver.formatEpoch(driver.getSubscriptionExpiry('avTransport'))
+
+    when: 'a write went missing, the next message puts it back'
+    driver.device.dataValues.remove('avTransport')
+    driver.device.dataValues['avTransport-expires'] = 'stale'
+    driver.parse(raw)
+
+    then:
+    driver.device.dataValues.avTransport == 'uuid:avt'
+    driver.device.dataValues['avTransport-expires'] == driver.formatEpoch(driver.getSubscriptionExpiry('avTransport'))
+  }
+
+  def "a NOTIFY for a subscription that holds no SID, or one that is dropped as an orphan, writes nothing"() {
+    given:
+    String body = avtBody('<TransportState val="PLAYING"/>')
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['NOTIFY /avt/unplaceable HTTP/1.1': '', 'X-SONOS-SERVICETYPE': 'AVTransport', 'SID': 'uuid:orphan', 'SEQ': '1'], body: body]
+    }
+    driver.metaClass.getParent = { -> new Expando(putAvtEvents: { String dni, List<Map> events, Object epoch, Object sequence -> }) }
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+
+    when:
+    driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt/unplaceable HTTP/1.1\r\nX-SONOS-SERVICETYPE: AVTransport\r\n\r\n' + body)
+
+    then:
+    !driver.device.dataValues.containsKey('avTransport')
+    !driver.device.dataValues.containsKey('avTransport-expires')
+
+    cleanup:
+    driver.upnpRequestQueues.clear()
+  }
+
+  def "mirroring a subscription that holds no SID leaves device data alone, and an unknown key is ignored"() {
+    when:
+    driver.mirrorSubscriptionToDeviceData('alarmClock')
+    driver.mirrorSubscriptionToDeviceData('somethingElse')
+    driver.mirrorSubscriptionToDeviceData(null)
+
+    then:
+    !driver.device.dataValues.containsKey('alarmClock')
   }
 
   def "startup refresh browses favorites and playlists without child devices"() {
@@ -1045,7 +1108,8 @@ class SonosAdvPlayerSpec extends Specification {
     lifecycleDriver.updated()
 
     then:
-    initialized == 1
+    // installed() leaves initialization to the app, which calls it once addChildDevice has returned
+    initialized == 0
     settingsUpdated == 1
   }
 
@@ -1230,6 +1294,8 @@ class SonosAdvPlayerSpec extends Specification {
     rawRequests.clear()
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
     driver.runtimeState.clear()
+    // Most behavior is exercised on a player this load has already set up.
+    driver.runtimeState.playerInitialized = true
     driver.state.clear()
     driver.binding.setVariable('atomicState', [:])
     driver.device.dataValues.clear()
@@ -1597,7 +1663,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.getWebSocketStatus() == 'closing'
-    driver.device.getDataValue('websocketStatus') == 'closing'
+    !driver.device.dataValues.containsKey('websocketStatus')
     driver.scheduled.count { List job -> job[1] == 'retryWebSocketConnection' } == 1
     driver.runtimeState.wsRetryCount == 1
   }
@@ -1638,7 +1704,7 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     websocketConnections.size() == 1
     driver.getWebSocketStatus() == 'connecting'
-    driver.device.getDataValue('websocketStatus') == 'connecting'
+    !driver.device.dataValues.containsKey('websocketStatus')
     driver.scheduled.any { List job -> job[1] == 'websocketConnectWatchdog' }
   }
 
@@ -1911,6 +1977,8 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.getSid('avTransport') == 'uuid:test-subscription'
+    driver.getSubscriptionExpiry('avTransport') != null
+    driver.device.dataValues.avTransport == 'uuid:test-subscription'
     driver.device.dataValues['avTransport-expires'] != null
     driver.scheduled.any { List row -> row[1] == 'resubscribeToAVTransport' }
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active == null
@@ -2148,67 +2216,12 @@ class SonosAdvPlayerSpec extends Specification {
     driver.upnpRequestQueues.clear()
   }
 
-  def "a SID stays known when its device data write is lost"() {
-    given:
-    driver.setSid('renderingControl', 'uuid:rc')
-    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-renderingControl', Instant.now().getEpochSecond() + 7200L)
-
-    when: 'a concurrent execution overwrites the data the SID was mirrored to'
-    driver.device.dataValues.remove('renderingControl')
-
-    then:
-    driver.getSid('renderingControl') == 'uuid:rc'
-    driver.hasSid('renderingControl')
-    driver.subValid('renderingControl')
-  }
-
-  def "held SIDs are seeded from device data once and a deleted SID is not brought back"() {
-    given: 'a reload: nothing in memory, SIDs only in device data'
-    driver.device.dataValues.avTransport = 'uuid:avt'
-    driver.device.dataValues.zgtSub = 'uuid:zgt'
-    driver.device.dataValues.contentDirectorySubscriptionId = 'uuid:cd'
-
-    expect:
-    driver.getSid('avTransport') == 'uuid:avt'
-    driver.getSid('zgt') == 'uuid:zgt'
-    driver.getSid('contentDirectory') == 'uuid:cd'
-
-    when: 'the SID is released and a stale write puts the old value back in device data'
-    driver.deleteSid('avTransport')
-    driver.device.dataValues.avTransport = 'uuid:avt'
-
-    then:
-    driver.getSid('avTransport') == null
-  }
-
-  def "a renewal of a SID whose data write was lost renews it instead of subscribing again"() {
-    given:
-    driver.setSid('avTransport', 'uuid:avt')
-    driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-avTransport', Instant.now().getEpochSecond() + 7200L)
-    driver.device.dataValues.remove('avTransport')
-
-    when:
-    driver.upnpResubscribeGeneric('resubscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
-
-    then:
-    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
-    rawRequests[0].contains('SID: uuid:avt')
-    !rawRequests[0].contains('CALLBACK:')
-
-    when: 'the renewal succeeds'
-    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:avt\r\nTIMEOUT: Second-3600\r\n\r\n')
-
-    then: 'the mirror in device data is written again'
-    driver.device.dataValues.avTransport == 'uuid:avt'
-  }
-
   def "removing a player releases subscriptions it holds only in memory"() {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.setSid('renderingControl', 'uuid:rc')
     driver.setSid('groupRenderingControl', 'uuid:grc')
     driver.setSid('zgt', 'uuid:zgt')
-    ['renderingControl', 'groupRenderingControl', 'zgtSub'].each { String key -> driver.device.dataValues.remove(key) }
 
     when:
     driver.uninstalled()
@@ -2219,6 +2232,163 @@ class SonosAdvPlayerSpec extends Specification {
 
     cleanup:
     driver.upnpRequestQueues.clear()
+  }
+
+  def "at debug the player publishes its live state to State Variables and re-arms a 60 second refresh"() {
+    given:
+    driver.settings.logLevel = 'debug'
+    driver.updateSid('avTransport', [SID: 'uuid:avt'], 1800L)
+    driver.updateSid('zgt', [SID: 'uuid:zgt'], 1800L)
+    driver.setLastInboundMrRcEvent()
+    driver.setLastWebsocketEvent()
+    driver.runtimeState.websocketStatus = 'open'
+
+    when:
+    driver.syncDiagnosticState()
+
+    then:
+    driver.state.subscriptionState.keySet() == ['avTransport', 'zgt'] as Set
+    driver.state.subscriptionState.avTransport.sid == 'uuid:avt'
+    driver.state.subscriptionState.avTransport.expires != null
+    driver.state.lastEventTimes.keySet() == ['lastMrRcEvent', 'lastWebsocketEvent'] as Set
+    driver.state.websocketConnection == [status: 'open']
+    driver.scheduled.any { List job -> job[1] == 'refreshDiagnosticState' && job[0] == 60 }
+
+    and: 'none of it goes to device data'
+    driver.device.dataValues.keySet().every { String key -> !(key in ['avTransport', 'zgtSub', 'lastMrRcEvent', 'lastWebsocketEvent', 'websocketStatus']) }
+  }
+
+  def "each refresh tick publishes again and re-arms while debug logging stays on"() {
+    given:
+    driver.settings.logLevel = 'trace'
+    driver.syncDiagnosticState()
+    driver.scheduled.clear()
+    driver.updateSid('contentDirectory', [SID: 'uuid:cd'], 1800L)
+
+    when:
+    driver.refreshDiagnosticState()
+
+    then:
+    driver.state.subscriptionState.contentDirectory.sid == 'uuid:cd'
+    driver.scheduled.count { List job -> job[1] == 'refreshDiagnosticState' && job[0] == 60 } == 1
+  }
+
+  def "at info the live state is cleared from State Variables and the refresh loop stops"() {
+    given:
+    driver.settings.logLevel = 'debug'
+    driver.updateSid('avTransport', [SID: 'uuid:avt'], 1800L)
+    driver.syncDiagnosticState()
+    driver.unschedules.clear()
+
+    when:
+    driver.settings.logLevel = 'info'
+    driver.syncDiagnosticState()
+
+    then:
+    !driver.state.containsKey('subscriptionState')
+    !driver.state.containsKey('lastEventTimes')
+    !driver.state.containsKey('websocketConnection')
+    driver.unschedules.contains('refreshDiagnosticState')
+
+    when: 'a tick that fires after the level was lowered also clears and does not re-arm'
+    driver.state.subscriptionState = [stale: true]
+    driver.scheduled.clear()
+    driver.refreshDiagnosticState()
+
+    then:
+    !driver.state.containsKey('subscriptionState')
+    !driver.scheduled.any { List job -> job[1] == 'refreshDiagnosticState' }
+  }
+
+  def "saving preferences, initialization and the health check all re-evaluate the state loop"() {
+    given:
+    driver.settings.logLevel = 'debug'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+
+    when:
+    driver.handleSettingsUpdate()
+
+    then:
+    driver.state.containsKey('subscriptionState')
+
+    when:
+    driver.state.remove('subscriptionState')
+    driver.scheduled.clear()
+    driver.websocketHealthCheck()
+
+    then:
+    driver.state.containsKey('subscriptionState')
+    driver.scheduled.any { List job -> job[1] == 'refreshDiagnosticState' }
+
+    when:
+    driver.state.remove('subscriptionState')
+    driver.runtimeState.remove('playerInitialized')
+    driver.initialize()
+
+    then:
+    driver.state.containsKey('subscriptionState')
+    driver.runtimeState.playerInitialized == true
+  }
+
+  def "initial subscription mirrors its SID and lease while diagnostic updates stay in memory"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    Set<String> before = new HashSet<String>(driver.device.dataValues.keySet())
+
+    when:
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'avTransport', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:avt\r\nTIMEOUT: Second-1800\r\n\r\n')
+    driver.setLastWebsocketEvent()
+    driver.setLastInboundMrGrcEvent()
+    driver.setLastInboundZgtEvent()
+    driver.setLastInboundHtControlEvent()
+    driver.webSocketStatus('status: closing')
+
+    then: 'the SID and its expiry are there; event times and the websocket status stay in memory'
+    (driver.device.dataValues.keySet() - before) == ['avTransport', 'avTransport-expires'] as Set
+  }
+
+  def "after a driver reload an unplaceable NOTIFY is not released; the player initializes instead"() {
+    given:
+    driver.runtimeState.remove('playerInitialized')
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+
+    when:
+    Boolean accepted = driver.acceptNotifySubscription('AVTransport', ['NOTIFY /avt/old-token HTTP/1.1': '', 'SID': 'uuid:live-before-reload'])
+
+    then:
+    !accepted
+    rawRequests.isEmpty()
+    driver.scheduled.any { List job -> job[1] == 'initializeAfterReload' }
+
+    when:
+    driver.initializeAfterReload()
+
+    then: 'the player is set up once and subscribes afresh'
+    driver.runtimeState.playerInitialized == true
+    websocketConnections.size() == 1
+    rawRequests.any { String request -> request.startsWith('SUBSCRIBE ') }
+
+    when: 'later NOTIFYs from subscriptions it does not hold are released as orphans again'
+    rawRequests.clear()
+    rawConnections.clear()
+    driver.upnpRequestQueues.clear()
+    driver.acceptNotifySubscription('AVTransport', ['NOTIFY /avt/old-token HTTP/1.1': '', 'SID': 'uuid:old-orphan'])
+
+    then:
+    rawRequests.any { String request -> request.startsWith('UNSUBSCRIBE ') && request.contains('uuid:old-orphan') }
+  }
+
+  def "initializeAfterReload does nothing once the player was set up"() {
+    given:
+    driver.runtimeState.playerInitialized = true
+
+    when:
+    driver.initializeAfterReload()
+
+    then:
+    websocketConnections.isEmpty()
+    rawRequests.isEmpty()
   }
 
   def "live subscription remains valid for its granted lease and repeated subscribe is coalesced"() {
@@ -2237,94 +2407,14 @@ class SonosAdvPlayerSpec extends Specification {
     driver.upnpRequestQueues.get('SONOS-TEST-DNI') == null
   }
 
-  def "ZGT subscription metadata uses its established expiry key"() {
-    when:
-    driver.updateSid('zgt', [SID: 'uuid:zgt-test'], 1800L)
-
-    then:
-    driver.device.dataValues.zgtSub == 'uuid:zgt-test'
-    driver.device.dataValues.zgtSubExpires != null
-    !driver.device.dataValues.containsKey('zgt')
-    !driver.device.dataValues.containsKey('zgt-expires')
-    !driver.device.dataValues.containsKey('zgtSubExpiresEpoch')
-  }
-
-  def "subscription device data sync restores SIDs and expiries lost to concurrent writes"() {
-    given:
-    driver.updateSid('avTransport', [SID: 'uuid:avt-test'], 1800L)
-    driver.updateSid('zgt', [SID: 'uuid:zgt-test'], 1800L)
-    driver.device.dataValues.remove('avTransport')
-    driver.device.dataValues.remove('avTransport-expires')
-
-    when:
-    driver.syncSubscriptionDeviceData()
-
-    then:
-    driver.device.dataValues.avTransport == 'uuid:avt-test'
-    driver.device.dataValues['avTransport-expires'] != null
-    driver.device.dataValues.zgtSub == 'uuid:zgt-test'
-  }
-
-  def "subscription device data sync does not resurrect deleted subscriptions"() {
-    given:
-    driver.updateSid('avTransport', [SID: 'uuid:avt-test'], 1800L)
-    driver.deleteSid('avTransport')
-
-    when:
-    driver.syncSubscriptionDeviceData()
-
-    then:
-    !driver.device.dataValues.containsKey('avTransport')
-    !driver.device.dataValues.containsKey('avTransport-expires')
-  }
-
-  def "a lease stored under a legacy sid key moves to its descriptive key before the prune"() {
-    given:
-    driver.device.dataValues['sid1'] = 'uuid:legacy-avt'
-    driver.device.dataValues['sid1-expires'] = '2026-Nov-27 1:29:59 PM'
-    driver.device.dataValues['sid2'] = 'uuid:legacy-rc'
-    driver.device.dataValues['sid4'] = 'uuid:legacy-grc'
-    driver.device.dataValues['sid5'] = 'uuid:legacy-ht'
-
-    when:
-    driver.pruneOrphanedDriverPersistence()
-
-    then:
-    ['sid1', 'sid1-expires', 'sid2', 'sid4', 'sid5'].every { String key -> !driver.device.dataValues.containsKey(key) }
-    driver.device.dataValues.avTransport == 'uuid:legacy-avt'
-    driver.device.dataValues['avTransport-expires'] == '2026-Nov-27 1:29:59 PM'
-    driver.device.dataValues.renderingControl == 'uuid:legacy-rc'
-    driver.device.dataValues.groupRenderingControl == 'uuid:legacy-grc'
-    driver.device.dataValues.htControl == 'uuid:legacy-ht'
-
-    and: 'the held SID is recognized, so a live NOTIFY is not treated as an orphan'
-    driver.acceptNotifySubscription('AVTransport', ['NOTIFY /avt/e1d1b3206774 HTTP/1.1': '', 'SID': 'uuid:legacy-avt'])
-  }
-
-  def "a legacy key never overwrites a lease already stored under the descriptive key"() {
-    given:
-    driver.device.dataValues['sid1'] = 'uuid:legacy-avt'
-    driver.device.dataValues['avTransport'] = 'uuid:current-avt'
-
-    when:
-    driver.migrateLegacySubscriptionKeys()
-
-    then:
-    driver.device.dataValues.avTransport == 'uuid:current-avt'
-    !driver.device.dataValues.containsKey('sid1')
-  }
-
-  def "last ZGT event timestamp uses the grouped ZGT device data name"() {
-    given:
-    driver.device.dataValues.lastZgtEvent = 'old timestamp'
-
+  def "the last ZGT event time is kept in memory only"() {
     when:
     driver.setLastInboundZgtEvent()
 
     then:
-    driver.device.dataValues.ZgtLastUpdated != null
-    !driver.device.dataValues.containsKey('lastZgtEvent')
     driver.eventTimestamps.get('SONOS-TEST-DNI-lastZgtEvent') != null
+    !driver.device.dataValues.containsKey('ZgtLastUpdated')
+    !driver.device.dataValues.containsKey('lastZgtEvent')
   }
 
   def "subscription with a persisted SID but unknown expiry is renewed and expiry lives in its own map"() {
@@ -2431,7 +2521,6 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.getSid('avTransport') == 'uuid:replacement'
-    driver.device.dataValues['avTransport-expires'] != null
     driver.subscriptionExpiryEpochs.get('SONOS-TEST-DNI-avTransport') > Instant.now().getEpochSecond()
     driver.scheduled.any { List row -> row[1] == 'resubscribeToAVTransport' }
     !driver.logs.any { String line -> line.contains('Ignoring UPnP SID update') }
@@ -3492,10 +3581,10 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.getSid('alarmClock') == 'uuid:alarm-clock'
-    driver.device.dataValues['alarmClock-expires'] != null
     driver.subValid('alarmClock')
     driver.scheduled.any { List row -> row[1] == 'resubscribeToAlarmClockEvents' }
-    !driver.device.dataValues.containsKey('zgtSub')
+    driver.device.dataValues.alarmClock == 'uuid:alarm-clock'
+    driver.device.dataValues['alarmClock-expires'] != null
 
     when:
     rawRequests.clear()
@@ -3526,14 +3615,13 @@ class SonosAdvPlayerSpec extends Specification {
     given:
     driver.setSid('alarmClock', 'uuid:alarm-clock')
     driver.subscriptionExpiryEpochs.put('SONOS-TEST-DNI-alarmClock', Instant.now().getEpochSecond() + 1800L)
-    driver.device.dataValues['alarmClock-expires'] = 'later'
 
     when:
     driver.clearPlayerSubscriptionsForInitialization()
 
     then:
     driver.getSid('alarmClock') == null
-    !driver.device.dataValues.containsKey('alarmClock-expires')
+    driver.getSubscriptionExpiry('alarmClock') == null
     rawRequests.any { String request -> request.startsWith('UNSUBSCRIBE /AlarmClock/Event HTTP/1.1') }
   }
 
@@ -4231,10 +4319,11 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.getSid('groupRenderingControl') == 'uuid:group-rendering'
-    driver.device.dataValues['groupRenderingControl-expires'] != null
     driver.subValid('groupRenderingControl')
     driver.scheduled.any { List row -> row[1] == 'resubscribeToMrGrcEvents' }
-    driver.EVENT_TIMESTAMP_KEYS.contains('lastMrGrcEvent')
+    driver.DIAGNOSTIC_EVENT_KEYS.contains('lastMrGrcEvent')
+    driver.device.dataValues.groupRenderingControl == 'uuid:group-rendering'
+    driver.device.dataValues['groupRenderingControl-expires'] != null
   }
 
   def "coordinator GRC NOTIFY is parsed and relayed after parse releases its gate"() {

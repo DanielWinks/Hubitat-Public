@@ -362,7 +362,7 @@ Boolean loggingEnabled(String messageLevel) {
   Integer messageIndex = LOG_LEVELS.indexOf(messageLevel)
   return configuredIndex >= 0 && messageIndex >= configuredIndex && messageIndex < LOG_LEVELS.indexOf('off')
 }
-// Used by debug-only event timestamp and subscription diagnostics.
+// True at debug and trace: the levels at which the player publishes its live subscription state.
 Boolean isDebugLoggingEnabled() {
   return loggingEnabled('debug')
 }
@@ -371,16 +371,49 @@ String getFormattedLocalTimestamp() {
   return ZonedDateTime.now(hubClock()).format(SID_TIMESTAMP_FORMATTER)
 }
 
-void updateEventTimestampDeviceData(String key) {
+// =============================================================================
+// Live state published to State Variables at debug and trace
+// =============================================================================
+@Field static final Integer DIAGNOSTIC_STATE_REFRESH_SECONDS = 60
+@Field static final List<String> DIAGNOSTIC_STATE_KEYS = ['subscriptionState', 'lastEventTimes', 'websocketConnection'].asImmutable()
+@Field static final List<String> DIAGNOSTIC_EVENT_KEYS = ['lastMrRcEvent', 'lastMrGrcEvent', 'lastZgtEvent', 'lastHtControlEvent', 'lastWebsocketEvent'].asImmutable()
+
+/**
+ * The player keeps its subscription and event state in memory. At debug and trace it copies that to State Variables
+ * once a minute so it can be read on the device page, from one scheduled execution that nothing else writes those
+ * keys from. At info and above it removes them and stops the loop. Call this whenever the log level may have changed.
+ */
+void syncDiagnosticState() {
   if(isDebugLoggingEnabled()) {
-    setDeviceDataValue(key, getFormattedLocalTimestamp())
+    publishDiagnosticState()
+    runIn(DIAGNOSTIC_STATE_REFRESH_SECONDS, 'refreshDiagnosticState', [overwrite: true])
+  } else {
+    DIAGNOSTIC_STATE_KEYS.each { String key -> state.remove(key) }
+    unschedule('refreshDiagnosticState')
   }
 }
 
-void removeEventTimestampDeviceDataKeys() {
-  EVENT_TIMESTAMP_KEYS.each { String key ->
-    if(device.getDataValue(key) != null) { device.removeDataValue(key) }
+/** The scheduled tick: publish again and re-arm, or clear and stop if the level has dropped to info or above. */
+void refreshDiagnosticState() {
+  syncDiagnosticState()
+}
+
+void publishDiagnosticState() {
+  Map<String, Map<String, String>> subscriptions = [:]
+  UPNP_SUBSCRIPTION_KEYS.each { String key ->
+    String sid = getSid(key)
+    if(sid == null) { return }
+    Long expiresEpoch = getSubscriptionExpiry(key)
+    subscriptions[key] = [sid: sid, expires: expiresEpoch != null ? formatEpoch(expiresEpoch) : 'unknown']
   }
+  Map<String, String> lastEvents = [:]
+  DIAGNOSTIC_EVENT_KEYS.each { String key ->
+    Long epoch = eventTimestamps.get("${getDeviceDNI()}-${key}".toString())
+    if(epoch != null && epoch > 0L) { lastEvents[key] = formatEpoch(epoch) }
+  }
+  state.subscriptionState = subscriptions
+  state.lastEventTimes = lastEvents
+  state.websocketConnection = [status: getWebSocketStatus()]
 }
 
 // =============================================================================
@@ -955,6 +988,8 @@ metadata {
 @Field static final List<String> UPNP_SUBSCRIPTION_KEYS = ['avTransport', 'renderingControl', 'zgt', 'groupRenderingControl', 'htControl', 'contentDirectory', 'alarmClock'].asImmutable()
 @Field static final String ORPHAN_UNSUBSCRIBED_RUNTIME_KEY = 'orphanUnsubscribedSids'
 @Field static final String HELD_SIDS_RUNTIME_KEY = 'heldSids'
+// Set once this load has initialized the player; a NOTIFY nothing explains before that makes it initialize.
+@Field static final String INITIALIZED_RUNTIME_KEY = 'playerInitialized'
 @Field static final String PROFILE_INIT_TOKEN_RUNTIME_KEY = 'profileInitToken'
 @Field static final String PENDING_SUBSCRIBE_TOKENS_RUNTIME_KEY = 'pendingSubscribeTokens'
 @Field static final Long ORPHAN_UNSUBSCRIBE_SUPPRESS_MILLIS = 600000L
@@ -1058,14 +1093,7 @@ metadata {
 
 @Field static ConcurrentHashMap<String, Map> groupVolumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Long> lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
-@Field static final String ZGT_SUB_DEVICE_KEY = 'zgtSub'
-@Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
 @Field static final String CONTENT_DIRECTORY_SUBSCRIPTION_KEY = 'contentDirectory'
-@Field static final String CONTENT_DIRECTORY_SUBSCRIPTION_ID_DEVICE_KEY = 'contentDirectorySubscriptionId'
-@Field static final String CONTENT_DIRECTORY_SUBSCRIPTION_EXPIRES_DEVICE_KEY = 'contentDirectorySubscriptionExpires'
-// Legacy names used before the ContentDirectory subscription got descriptive keys. Read only for migration.
-@Field static final String LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY = 'sid6'
-@Field static final String LEGACY_CONTENT_DIRECTORY_EXPIRES_DEVICE_KEY = 'sid6-expires'
 @Field static final String ZGT_ELIGIBLE_RUNTIME_KEY = 'zgtElectionEligible'
 @Field static final String ZGT_OFFLINE_REPORTED_RUNTIME_KEY = 'zgtOfflineReported'
 @Field static final String CATALOG_REFRESH_OWNER_RUNTIME_KEY = 'catalogRefreshOwner'
@@ -1081,6 +1109,10 @@ metadata {
   'lastError',
   'lastErrorReason',
   'lastErrorObservedAt',
+  // Live subscription state, published to State Variables at debug and trace only (see syncDiagnosticState).
+  'subscriptionState',
+  'lastEventTimes',
+  'websocketConnection',
 ]))
 
 @Field static final Set<String> ACTIVE_PLAYER_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
@@ -1089,7 +1121,6 @@ metadata {
   'capabilities',
   'householdId',
   'modelDisplayName',
-  'websocketStatus',
   'hostId',
   'upnpPort',
   'zoneKind',
@@ -1103,30 +1134,24 @@ metadata {
   'secondaryDeviceIps',
   'rightChannelId',
   'rightChannelDeviceIp',
-  'zgtSub',
-  'zgtSubExpires',
   'runtimeStateMigrationVersion', // literal value of RUNTIME_MIGRATION_MARKER_KEY: Hubitat rejects constant refs in static Set initializers
   'normalAnnouncementMode',
   'highPriorityAnnouncementMode',
+  // Subscription SIDs and lease expiries, mirrored from memory on every inbound NOTIFY.
   'avTransport',
-  'renderingControl',
-  'groupRenderingControl',
-  'htControl',
-  'sid6',
-  'contentDirectorySubscriptionId',
-  'alarmClock',
   'avTransport-expires',
+  'renderingControl',
   'renderingControl-expires',
+  'groupRenderingControl',
   'groupRenderingControl-expires',
+  'htControl',
   'htControl-expires',
-  'sid6-expires',
+  'zgtSub',
+  'zgtSubExpires',
+  'contentDirectorySubscriptionId',
   'contentDirectorySubscriptionExpires',
+  'alarmClock',
   'alarmClock-expires',
-  'lastMrRcEvent',
-  'lastMrGrcEvent',
-  'ZgtLastUpdated',
-  'lastHtControlEvent',
-  'lastWebsocketEvent',
 ]))
 
 @Field static final Set<String> ACTIVE_PLAYER_CURRENT_STATE_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>([
@@ -1218,8 +1243,6 @@ metadata {
 // Migration-Prune Helpers — whitelist-driven for-each removal
 // =============================================================================
 Map<String, Object> pruneOrphanedDriverPersistence() {
-  // The prune deletes legacy keys, so a lease stored under one has to be moved first.
-  migrateLegacySubscriptionKeys()
   Map<String, Object> result = [
     stateRemoved: pruneOrphanStateKeys(state as Map, ACTIVE_PLAYER_STATE_KEYS),
     atomicStateRemoved: pruneOrphanStateKeys(atomicState as Map, Collections.emptySet()),
@@ -1344,7 +1367,9 @@ void unsubscribeHeldSidsOnUninstall() {
   }
 }
 void installed() {
-  initialize()
+  // installed() runs inside the app's addChildDevice call, before the hub has committed this device. Starting the
+  // UPnP/WebSocket traffic now makes the app publish the first AVT/RC/ZGT events to a device that does not exist
+  // yet, and they are lost. The app calls initialize() once addChildDevice has returned its handle.
   sendPlayerPreferencesToParent()
 }
 void updated() {
@@ -1467,6 +1492,7 @@ void handleSettingsUpdate() {
     favoritesMapInitialization()
   }
   sendParentAppRequest('needCurrentlyPlayingStates')
+  syncDiagnosticState()
 }
 
 /** Send the app-required settings to the parent after updated() finishes. */
@@ -1547,6 +1573,8 @@ void performImmediateInitialization() {
   refreshUpnpMediaCatalogs()
   scheduleWebsocketHealthCheck()
   requestPlayerProfile(1)
+  runtimeState[INITIALIZED_RUNTIME_KEY] = true
+  syncDiagnosticState()
 }
 
 
@@ -1558,8 +1586,6 @@ void performImmediateInitialization() {
 void clearPlayerSubscriptionsForInitialization() {
   String dni = device.getDeviceNetworkId()
   if(!dni) { return }
-  migrateLegacyContentDirectorySubscription()
-  migrateLegacySubscriptionKeys()
   List<String> held = UPNP_SUBSCRIPTION_KEYS.findAll { String key -> subValid(key) || getSid(key) != null }
   invalidateUpnpRequestsForDevice()
   // Release every subscription this player holds. Each request captures its SID now, so the local deletes
@@ -1569,8 +1595,6 @@ void clearPlayerSubscriptionsForInitialization() {
   getPendingSubscribeTokens().clear()
   // Synchronous local delete after generation bump — stale callbacks are guarded by generation
   UPNP_SUBSCRIPTION_KEYS.each { String key -> deleteSid(key) }
-  device.removeDataValue(LEGACY_CONTENT_DIRECTORY_EXPIRES_DEVICE_KEY)
-  device.removeDataValue(LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY)
 }
 
 void enqueueUnsubscribeForHeldSid(String sidKey) {
@@ -1638,9 +1662,22 @@ Boolean acceptNotifySubscription(String serviceType, Map headers) {
   String pathToken = notifyPathToken(headers)
   String pendingToken = getPendingSubscribeTokens().get(sidKey)
   if(pathToken && pendingToken && pathToken == pendingToken) { return true }
+  if(runtimeState[INITIALIZED_RUNTIME_KEY] != true) {
+    // Held SIDs live in memory, so after a driver reload this player knows none of its subscriptions: the NOTIFY
+    // may well be a live one. Do not release it; set the player up again, which subscribes afresh.
+    logDebug("Ignoring a UPnP ${serviceType} NOTIFY the driver cannot place after a reload; initializing the player")
+    runIn(2, 'initializeAfterReload', [overwrite: false])
+    return false
+  }
   logDebug("Ignoring UPnP ${serviceType} NOTIFY from an orphaned subscription; sid=${notifySid ?: 'none'}, pathToken=${pathToken ?: 'none'}")
   if(notifySid) { unsubscribeOrphanedSid(sidKey, notifySid) }
   return false
+}
+
+/** The first thing after a driver reload that shows subscriptions are out there: set the player up again. */
+void initializeAfterReload() {
+  if(runtimeState[INITIALIZED_RUNTIME_KEY] == true) { return }
+  performImmediateInitialization()
 }
 
 void unsubscribeOrphanedSid(String sidKey, String sid) {
@@ -1842,6 +1879,8 @@ void websocketHealthCheck() {
     }
   } finally {
     if(runtimeState[WS_SHUTDOWN_KEY] != true) { scheduleWebsocketHealthCheck() }
+    // Re-arm the state loop if its job was lost (a code save does not stop schedules, but a missed run would).
+    syncDiagnosticState()
   }
 }
 
@@ -4075,10 +4114,11 @@ void parse(String raw) {
       return
     }
     if(!acceptNotifySubscription(serviceType, messageHeaders)) { return }
-    // Stamp once the notification is accepted (known service, headers and body present) but before any XML
-    // parsing, so a stalled older notification can never receive a higher sequence than a newer one, and
-    // ignored notifications do not burn sequence numbers.
+    // Stamp once the notification is accepted (known service, headers and body present) but before the device-data
+    // mirror and any XML parsing, so a stalled older notification can never receive a higher sequence than a newer
+    // one, and ignored notifications do not burn sequence numbers.
     Map notifyStamp = stampParentPayload([:])
+    mirrorSubscriptionToDeviceData(NOTIFY_SERVICE_SID_KEYS[serviceType])
     handleNotifyService(serviceType, xmlBody, notifyStamp)
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
 }
@@ -5216,116 +5256,53 @@ Boolean hasSid(String sid) {
 DeviceWrapper getThisDevice() {
   return this.device as DeviceWrapper
 }
-@CompileStatic
-String subscriptionIdDataKey(String subscriptionKey) {
-  if(subscriptionKey == 'zgt') { return ZGT_SUB_DEVICE_KEY }
-  if(subscriptionKey == CONTENT_DIRECTORY_SUBSCRIPTION_KEY) { return CONTENT_DIRECTORY_SUBSCRIPTION_ID_DEVICE_KEY }
-  return subscriptionKey
-}
-@CompileStatic
-String subscriptionExpiryDataKey(String subscriptionKey) {
-  if(subscriptionKey == 'zgt') { return ZGT_SUB_EXPIRES_DEVICE_KEY }
-  if(subscriptionKey == CONTENT_DIRECTORY_SUBSCRIPTION_KEY) { return CONTENT_DIRECTORY_SUBSCRIPTION_EXPIRES_DEVICE_KEY }
-  return "${subscriptionKey}-expires".toString()
-}
-// Device data keys used before the subscriptions got descriptive names. Read only for migration.
-@Field static final Map<String, String> LEGACY_SUBSCRIPTION_KEYS = [sid1: 'avTransport', sid2: 'renderingControl',
-  sid4: 'groupRenderingControl', sid5: 'htControl'].asImmutable()
 /**
- * Move a lease held under a pre-rename key (sid1, sid2, sid4, sid5) onto its descriptive key, before the prune
- * deletes it, so a live subscription keeps being recognized and released instead of being orphaned. The expiry
- * is only informational: the lease is renewed because no in-memory expiry is known after an upgrade.
- */
-void migrateLegacySubscriptionKeys() {
-  LEGACY_SUBSCRIPTION_KEYS.each { String legacyKey, String key ->
-    String legacySid = device.getDataValue(legacyKey)
-    String legacyExpiryKey = "${legacyKey}-expires".toString()
-    String legacyExpiry = device.getDataValue(legacyExpiryKey)
-    if(legacySid != null && device.getDataValue(subscriptionIdDataKey(key)) == null) {
-      setDeviceDataValue(subscriptionIdDataKey(key), legacySid)
-      if(legacyExpiry != null) { setDeviceDataValue(subscriptionExpiryDataKey(key), legacyExpiry) }
-    }
-    device.removeDataValue(legacyKey)
-    device.removeDataValue(legacyExpiryKey)
-  }
-}
-/** Move a pre-rename ContentDirectory SID onto the descriptive key so the normal unsubscribe path can release it. */
-void migrateLegacyContentDirectorySubscription() {
-  String legacySid = device.getDataValue(LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY)
-  if(legacySid && !device.getDataValue(CONTENT_DIRECTORY_SUBSCRIPTION_ID_DEVICE_KEY)) {
-    setDeviceDataValue(CONTENT_DIRECTORY_SUBSCRIPTION_ID_DEVICE_KEY, legacySid)
-  }
-  device.removeDataValue(LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY)
-  device.removeDataValue(LEGACY_CONTENT_DIRECTORY_EXPIRES_DEVICE_KEY)
-}
-/**
- * The SIDs this player holds, kept in memory for as long as the driver is loaded and seeded once from device data.
- * Device data is only a mirror that survives a reload: concurrent executions on one player (an initialization that
- * is still running while subscription callbacks arrive) can overwrite each other's data writes, and a SID lost that
- * way would make a renewal subscribe again, leave the old subscription on the speaker and keep it from being released.
+ * The SIDs this player holds, in memory for as long as the driver is loaded. Device data only mirrors them (see
+ * SUBSCRIPTION_DATA_KEYS) and is never read back: after a reload nothing is held, and the first NOTIFY that no held
+ * SID explains makes the player initialize again (see acceptNotifySubscription).
  */
 ConcurrentHashMap<String, String> getHeldSids() {
-  Object held = runtimeState.get(HELD_SIDS_RUNTIME_KEY)
-  if(held != null) { return (ConcurrentHashMap<String, String>)held }
-  ConcurrentHashMap<String, String> seeded = new ConcurrentHashMap<String, String>()
-  migrateLegacyContentDirectorySubscription()
-  migrateLegacySubscriptionKeys()
-  UPNP_SUBSCRIPTION_KEYS.each { String key ->
-    String persisted = device.getDataValue(subscriptionIdDataKey(key))
-    if(persisted != null) { seeded.put(key, persisted) }
-  }
-  Object raced = runtimeState.putIfAbsent(HELD_SIDS_RUNTIME_KEY, seeded)
-  return (ConcurrentHashMap<String, String>)(raced != null ? raced : seeded)
+  return (ConcurrentHashMap<String, String>)runtimeState.computeIfAbsent(HELD_SIDS_RUNTIME_KEY) { String key -> new ConcurrentHashMap<String, String>() }
 }
 String getSid(String sid) {
   return getHeldSids().get(sid)
 }
 void setSid(String sid, String value) {
   getHeldSids().put(sid, value)
-  setDeviceDataValue(subscriptionIdDataKey(sid), value)
 }
 void deleteSid(String sid) {
-  String sidDataKey = subscriptionIdDataKey(sid)
-  String expiryDataKey = subscriptionExpiryDataKey(sid)
-  Boolean held = getHeldSids().remove(sid) != null
+  if(getHeldSids().remove(sid) != null) { logDebug("Removing SID for ${sid}") }
   clearPendingSubscribeToken(sid)
-  if(held || device.getDataValue(sidDataKey) != null || device.getDataValue(expiryDataKey) != null) {
-    logDebug("Removing SID for ${sid}")
-  }
-  device.removeDataValue(sidDataKey)
-  device.removeDataValue(expiryDataKey)
   clearSubscriptionExpiry(sid)
-  if(sid == 'zgt') {
-    // Remove the previous persisted epoch value; the formatted expiry is retained separately.
-    device.removeDataValue('zgtSubExpiresEpoch')
-  }
+  SUBSCRIPTION_DATA_KEYS[sid]?.each { String dataKey -> device.removeDataValue(dataKey) }
 }
+
+// Device data keys that show each subscription's SID and lease expiry. The in-memory values are the source of truth;
+// the keys are rewritten from them on every inbound NOTIFY, so a write that went missing is put back by the next
+// message for that service (see mirrorSubscriptionToDeviceData).
+@Field static final Map<String, List<String>> SUBSCRIPTION_DATA_KEYS = [
+  avTransport: ['avTransport', 'avTransport-expires'],
+  renderingControl: ['renderingControl', 'renderingControl-expires'],
+  groupRenderingControl: ['groupRenderingControl', 'groupRenderingControl-expires'],
+  htControl: ['htControl', 'htControl-expires'],
+  zgt: ['zgtSub', 'zgtSubExpires'],
+  contentDirectory: ['contentDirectorySubscriptionId', 'contentDirectorySubscriptionExpires'],
+  alarmClock: ['alarmClock', 'alarmClock-expires']
+].asImmutable()
+
 /**
- * Concurrent executions on one player can overwrite each other's device data writes, so a SID or expiry written when a
- * subscription was accepted can be lost. The in-memory copy is authoritative; shortly after the last acceptance this
- * rewrites any held SID or expiry that device data no longer shows.
+ * Write the held SID and lease expiry of one subscription to device data when missing or different. Called for every inbound
+ * NOTIFY of that service and when a subscription is accepted. Nothing is written for a subscription that holds no SID.
  */
-void scheduleSubscriptionDeviceDataSync() {
-  runIn(3, 'syncSubscriptionDeviceData', [overwrite: true])
-}
-void syncSubscriptionDeviceData() {
-  UPNP_SUBSCRIPTION_KEYS.each { String key ->
-    String sid = getSid(key)
-    if(sid == null) { return }
-    String sidDataKey = subscriptionIdDataKey(key)
-    if(device.getDataValue(sidDataKey) != sid) {
-      logDebug("Restoring device data ${sidDataKey}; a concurrent execution overwrote it")
-      setDeviceDataValue(sidDataKey, sid)
-    }
-    Long expiresEpoch = getSubscriptionExpiry(key)
-    if(expiresEpoch != null) {
-      String expiryDataKey = subscriptionExpiryDataKey(key)
-      String formatted = formatEpoch(expiresEpoch)
-      if(device.getDataValue(expiryDataKey) != formatted) {
-        logDebug("Restoring device data ${expiryDataKey}; a concurrent execution overwrote it")
-        setDeviceDataValue(expiryDataKey, formatted)
-      }
-    }
+void mirrorSubscriptionToDeviceData(String sidKey) {
+  List<String> dataKeys = sidKey != null ? SUBSCRIPTION_DATA_KEYS[sidKey] : null
+  String sid = dataKeys != null ? getSid(sidKey) : null
+  if(sid == null) { return }
+  if(device.getDataValue(dataKeys[0]) != sid) { setDeviceDataValue(dataKeys[0], sid) }
+  Long expiresEpoch = getSubscriptionExpiry(sidKey)
+  if(expiresEpoch != null) {
+    String expires = formatEpoch(expiresEpoch)
+    if(device.getDataValue(dataKeys[1]) != expires) { setDeviceDataValue(dataKeys[1], expires) }
   }
 }
 @CompileStatic
@@ -5348,7 +5325,7 @@ void clearSubscriptionExpiry(String subscriptionKey) {
 Boolean subValid(String sid) {
   Long exp = getSubscriptionExpiry(sid)
   if(exp == null) {
-    // Expiry is memory-only; after a reboot or code save a persisted SID has no known lease, so renew now.
+    // A SID with no known lease is renewed now.
     if(hasSid(sid)) { logDebug("Subscription ${sid} has a SID but no known expiry; renewing") }
     return false
   }
@@ -5359,17 +5336,9 @@ Boolean subValid(String sid) {
 @CompileStatic
 void updateSid(String sid, Map headers, Long grantedTimeout = null) {
   long expiresEpochValue = Instant.now().getEpochSecond() + effectiveLeaseSeconds(grantedTimeout)
-  Long expiresEpoch = Long.valueOf(expiresEpochValue)
-  setSubscriptionExpiry(sid, expiresEpoch)
-  // Write human-readable expiry to device data for visibility
-  String formatted = formatEpoch(expiresEpoch)
-  String expiryDataKey = subscriptionExpiryDataKey(sid)
-  setDeviceDataValue(expiryDataKey, formatted)
+  setSubscriptionExpiry(sid, Long.valueOf(expiresEpochValue))
   if(headers["SID"]) {setSid(sid, headers["SID"].toString())}
   if(headers["sid"]) {setSid(sid, headers["sid"].toString())}
-  if(sid == 'zgt') {
-    device.removeDataValue('zgtSubExpiresEpoch')
-  }
 }
 
 void scheduleResubscriptionToEvents(String eventsToResub, Long grantedTimeout = null) {
@@ -5735,7 +5704,7 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
         if(sidValue) { updateSid(request.sidKey as String, [SID: sidValue], timeout) }
         else { updateSid(request.sidKey as String, [SID: request.sid], timeout) }
         clearPendingSubscribeToken(request.sidKey as String)
-        scheduleSubscriptionDeviceDataSync()
+        mirrorSubscriptionToDeviceData(request.sidKey as String)
         logDebug("UPnP SID accepted guid=${request.guid} sidKey=${request.sidKey} sidPresent=${sidValue != null} grantedTimeoutSeconds=${timeout} resubscribe=${request.resub ?: 'none'}")
         if(request.sidKey == 'zgt') {
           logDebug("ZGT subscription ${request.operation} accepted with SID, device data zgtSub updated")
@@ -6376,7 +6345,6 @@ Long getLastInboundMrRcEventEpoch() {
 @CompileStatic
 void setLastInboundMrRcEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastMrRcEvent" as String, Instant.now().getEpochSecond())
-  updateEventTimestampDeviceData('lastMrRcEvent')
 }
 @CompileStatic
 Boolean lastMrRcEventWithin(Long seconds) {
@@ -6395,7 +6363,6 @@ Long getLastInboundMrGrcEventEpoch() {
 @CompileStatic
 void setLastInboundMrGrcEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastMrGrcEvent" as String, Instant.now().getEpochSecond())
-  updateEventTimestampDeviceData('lastMrGrcEvent')
 }
 
 @CompileStatic
@@ -6406,8 +6373,6 @@ Long getLastInboundZgtEventEpoch() {
 @CompileStatic
 void setLastInboundZgtEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastZgtEvent" as String, Instant.now().getEpochSecond())
-  device.removeDataValue('lastZgtEvent')
-  updateEventTimestampDeviceData('ZgtLastUpdated')
 }
 @CompileStatic
 Boolean lastZgtEventWithin(Integer seconds) {
@@ -6425,7 +6390,6 @@ Long getLastInboundHtControlEventEpoch() {
 @CompileStatic
 void setLastInboundHtControlEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastHtControlEvent" as String, Instant.now().getEpochSecond())
-  updateEventTimestampDeviceData('lastHtControlEvent')
 }
 @CompileStatic
 Boolean lastMrGrcEventWithin(Integer seconds) {
@@ -6443,7 +6407,6 @@ Long getLastWebsocketEventEpoch() {
 @CompileStatic
 void setLastWebsocketEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastWebsocketEvent" as String, Instant.now().getEpochSecond())
-  updateEventTimestampDeviceData('lastWebsocketEvent')
 }
 @CompileStatic
 Boolean lastWebsocketEventWithin(Integer seconds) {
@@ -6483,7 +6446,6 @@ void releaseFavPlaylistDelegate() {
 }
 
 // Track whether the inbound audioClip status subscription is active.
-@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastMrRcEvent', 'lastMrGrcEvent', 'lastZgtEvent', 'ZgtLastUpdated', 'lastHtControlEvent', 'lastWebsocketEvent']
 
 String getWsSubscriptionValue(String namespace) {
   String key = "${this.device?.getDeviceNetworkId()}-WS-${namespace}".toString()
@@ -6968,7 +6930,6 @@ Boolean applyWebSocketStatus(String status, String requiredCurrent) {
     else { runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY) }
   }
   logDebug("Primary WebSocket status transition: previous=${previousStatus}, next=${status}")
-  setDeviceDataValue('websocketStatus', status)
   if(status == 'open') {
     // Re-establish the audioClip status subscription after reconnecting.
     subscribeToAudioClip()
@@ -6992,7 +6953,6 @@ Boolean claimWebSocketConnect() {
       claimed = true
     }
   }
-  if(claimed) { setDeviceDataValue('websocketStatus', 'connecting') }
   return claimed
 }
 

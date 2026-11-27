@@ -2539,6 +2539,12 @@ Boolean provisionPlayerDevice(String dni, Map playerInfo, Map<String, Map> secon
   }
   if(cd) { refreshPlayerAnnouncementPolicySnapshot(cd) }
   refreshGroupDeviceCoordinators()
+  // The driver's installed() deliberately does not initialize: the device is not committed until addChildDevice
+  // returns. With the handle in hand it is live, so bring the player up now.
+  if(created) {
+    try { cd.initialize() }
+    catch(Exception e) { logError("Could not initialize new player ${dni}: ${e.message}") }
+  }
   return created
 }
 

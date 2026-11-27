@@ -207,7 +207,7 @@ class WhitelistMigrationSpec extends Specification {
     !playerDriver.state.containsKey('orphanState')
   }
 
-  def "player prunes orphan device data but keeps ZGT subscription data"() {
+  def "player prunes orphan device data but keeps install-time values and the subscription mirror keys"() {
     given:
     playerDriver.device.dataValues['id'] = 'RINCON_123'
     playerDriver.device.dataValues['zgtSub'] = 'uuid:zgt-subscription'
@@ -225,6 +225,7 @@ class WhitelistMigrationSpec extends Specification {
 
     then:
     playerDriver.device.dataValues.containsKey('id')
+    playerDriver.device.dataValues.containsKey('deviceIp')
     playerDriver.device.dataValues.containsKey('zgtSub')
     playerDriver.device.dataValues.containsKey('zgtSubExpires')
     !playerDriver.device.dataValues.containsKey('localUpnpHost')
@@ -269,17 +270,24 @@ class WhitelistMigrationSpec extends Specification {
     !playerDriver.settings.containsKey('logEnable')
   }
 
-  def "player prunes sid-expiresFormatted via whitelist"() {
+  def "player prunes the retired subscription and event keys but keeps the current mirror keys"() {
     given:
-    playerDriver.device.dataValues['avTransport-expiresFormatted'] = 'formatted'
-    playerDriver.device.dataValues['avTransport-expires'] = 'expires'
+    List<String> kept = ['id', 'deviceIp', 'capabilities', 'householdId', 'hasBattery', 'avTransport', 'avTransport-expires',
+      'renderingControl', 'renderingControl-expires', 'groupRenderingControl', 'groupRenderingControl-expires', 'htControl',
+      'htControl-expires', 'contentDirectorySubscriptionId', 'contentDirectorySubscriptionExpires', 'alarmClock', 'alarmClock-expires',
+      'zgtSub', 'zgtSubExpires']
+    List<String> retired = ['sid1', 'sid2', 'sid4', 'sid5', 'sid6', 'sid1-expires', 'sid6-expires', 'avTransport-expiresFormatted',
+      'zgtSubExpiresEpoch', 'lastMrRcEvent', 'lastMrGrcEvent', 'lastZgtEvent', 'ZgtLastUpdated', 'lastHtControlEvent',
+      'lastWebsocketEvent', 'websocketStatus', 'subscriptionToken']
+    kept.each { String key -> playerDriver.device.dataValues[key] = 'kept' }
+    retired.each { String key -> playerDriver.device.dataValues[key] = 'retired' }
 
     when:
     playerDriver.pruneOrphanedDriverPersistence()
 
     then:
-    !playerDriver.device.dataValues.containsKey('avTransport-expiresFormatted')
-    playerDriver.device.dataValues.containsKey('avTransport-expires')
+    kept.every { String key -> playerDriver.device.dataValues.containsKey(key) }
+    retired.every { String key -> !playerDriver.device.dataValues.containsKey(key) }
   }
 
   // ---------- Group Driver ----------

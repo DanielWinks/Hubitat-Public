@@ -180,6 +180,8 @@ class SonosAppGroupDouble extends ChildDeviceWrapper {
 /** An existing player device that records what the app tells the driver after changing its data. */
 class RecordingPlayerDevice extends dwinks.hubitat.stubs.MockDevice {
   List<Boolean> provisioningCalls = []
+  Integer initializeCalls = 0
+  void initialize() { initializeCalls++ }
   void provisioningDataChanged(Boolean endpointChanged) { provisioningCalls << endpointChanged }
 }
 
@@ -4069,6 +4071,23 @@ class SonosAdvancedAppSpec extends Specification {
     props.data.rightChannelDeviceIp == '192.168.1.39'
     appScript.app.getChildDevice('542A1B671954').dataValues.deviceIp == '192.168.1.34'
     !appScript.scheduled.any { List item -> item[1] in ['runSecondaryConfiguration', 'retryProvisionedDeviceConfiguration'] }
+  }
+
+  def "a new player is initialized by the app after addChildDevice returns, not inside installed()"() {
+    given:
+    RecordingPlayerDevice created = new RecordingPlayerDevice(deviceNetworkId: '542A1B671954')
+    appScript.metaClass.addChildDevice = { String ns, String type, String dni, Map props ->
+      assert created.initializeCalls == 0
+      appScript.children << created
+      return created
+    }
+    Map player = [id: 'RINCON_542A1B67195401400', name: "Kids' Room", deviceIp: '192.168.1.34']
+
+    when:
+    appScript.provisionPlayerDevice('542A1B671954', player, [:])
+
+    then:
+    created.initializeCalls == 1
   }
 
   def "a player without an id or address is not created"() {
