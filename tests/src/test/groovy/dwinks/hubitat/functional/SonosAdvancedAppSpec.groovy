@@ -206,6 +206,7 @@ class SonosAdvancedAppSpec extends Specification {
   static final List<String> NEW_CALLBACKS = ['applyPlayerAttributeUpdateCallback', 'groupAnnouncementProgressCallback',
     'processUpnpNotificationCallback', 'groupTopologyOperationEventHandler', 'applyAvtCallback', 'applyRcCallback',
     'recalculateVolumeStateCallback', 'publishGroupRenderingCallback', 'deliverCatalogSnapshot',
+    'deliverFavoritesCatalogSnapshot', 'deliverPlaylistsCatalogSnapshot',
     'processPlayerCommandRequest', 'processGroupCommandRequest', 'refreshPlayerPolicyCallback',
     'completePlayerAudioClipCallback', 'dispatchNextPlayerAudioClipsCallback']
 
@@ -3832,13 +3833,63 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     delivered.isEmpty()
-    appScript.scheduled.any { List job -> job[1] == 'deliverCatalogSnapshot' && job[2].data.catalogType == 'playlists' }
+    appScript.scheduled*.getAt(1) == ['deliverPlaylistsCatalogSnapshot']
+    appScript.scheduled[0][2].overwrite == true
 
     when:
-    runScheduledCallbacks(['deliverCatalogSnapshot'])
+    runScheduledCallbacks(['deliverPlaylistsCatalogSnapshot'])
 
     then:
     delivered == [[child: 'Sonos Advanced Controller - Playlists', records: [[id: '7', name: 'Mix', imageUrl: '']], dni: 'PLAYER-1']]
+  }
+
+  def "repeated catalog snapshots keep one pending delivery per catalog and deliver only the latest"() {
+    given:
+    List<Map> delivered = []
+    ['Sonos Advanced Controller - Favorites', 'Sonos Advanced Controller - Playlists'].eachWithIndex { String childName, int index ->
+      def child = new dwinks.hubitat.stubs.MockInstalledApp(id: 960L + index, name: childName)
+      child.metaClass.storeCatalogSnapshot = { List<Map> records, String dni = null -> delivered << [child: childName, ids: records*.id, dni: dni] }
+      appScript.app.childApps << child
+    }
+    // Hubitat replaces a pending job for the same handler when overwrite is true.
+    appScript.metaClass.runInMillis = { Number ms, String method, Map opts = [:] ->
+      if(opts?.overwrite == true) { appScript.scheduled.removeAll { List job -> job[1] == method } }
+      appScript.scheduled << [ms, method, opts]
+    }
+
+    when: 'three players report the same household catalogs many times before any delivery runs'
+    50.times { int pass ->
+      ['PLAYER-1', 'PLAYER-2', 'PLAYER-3'].each { String dni ->
+        appScript.putCatalogSnapshot(dni, 'playlists', [])
+        appScript.putCatalogSnapshot(dni, 'favorites', [[id: "${pass}".toString(), name: 'Fav', imageUrl: '']])
+      }
+    }
+
+    then: 'the app holds one delivery job per catalog, not one per report'
+    appScript.scheduled*.getAt(1).sort() == ['deliverFavoritesCatalogSnapshot', 'deliverPlaylistsCatalogSnapshot']
+
+    when:
+    runScheduledCallbacks(['deliverFavoritesCatalogSnapshot', 'deliverPlaylistsCatalogSnapshot'])
+
+    then: 'each child receives the latest snapshot once'
+    delivered.size() == 2
+    delivered.find { Map row -> row.child.endsWith('Playlists') } == [child: 'Sonos Advanced Controller - Playlists', ids: [], dni: 'PLAYER-3']
+    delivered.find { Map row -> row.child.endsWith('Favorites') } == [child: 'Sonos Advanced Controller - Favorites', ids: ['49'], dni: 'PLAYER-3']
+  }
+
+  def "a catalog delivery job queued by the previous release still delivers"() {
+    given:
+    List<Map> delivered = []
+    def child = new dwinks.hubitat.stubs.MockInstalledApp(id: 970L, name: 'Sonos Advanced Controller - Favorites')
+    child.metaClass.storeCatalogSnapshot = { List<Map> records, String dni = null -> delivered << [ids: records*.id] }
+    appScript.app.childApps << child
+    appScript.withMemoryMap('catalogSnapshots') { Map snapshots -> snapshots.favorites = [dni: 'PLAYER-1', records: [[id: '3', name: 'Fav', imageUrl: '']]] }
+
+    when:
+    appScript.deliverCatalogSnapshot([catalogType: 'favorites'])
+
+    then:
+    delivered == [[ids: ['3']]]
   }
 
   def "a catalog snapshot stays in memory when the child app cannot accept it and is re-delivered on demand"() {
@@ -3855,15 +3906,15 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.putCatalogSnapshot('PLAYER-1', 'playlists', [[id: '7', name: 'Mix', imageUrl: '']])
 
     when:
-    runScheduledCallbacks(['deliverCatalogSnapshot'])
+    runScheduledCallbacks(['deliverPlaylistsCatalogSnapshot'])
 
     then:
     appScript.memoryMapCopy('catalogSnapshots').playlists.records*.id == ['7']
-    !appScript.scheduled.any { List job -> job[1] == 'deliverCatalogSnapshot' }
+    !appScript.scheduled.any { List job -> job[1] == 'deliverPlaylistsCatalogSnapshot' }
 
     when:
     appScript.deliverRetainedCatalogSnapshots()
-    runScheduledCallbacks(['deliverCatalogSnapshot'])
+    runScheduledCallbacks(['deliverPlaylistsCatalogSnapshot'])
 
     then:
     delivered*.records == [[[id: '7', name: 'Mix', imageUrl: '']]]

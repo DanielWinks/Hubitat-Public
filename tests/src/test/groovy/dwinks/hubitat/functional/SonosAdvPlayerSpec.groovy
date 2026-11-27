@@ -213,6 +213,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.runtimeState.catalogRefreshOwner = false
     driver.runtimeState.favoritesUpdateToken = 'R,2'
+    driver.advanceCatalogToken('favorites', 'R,2')
     seedUpnpFavorite('1')
 
     when:
@@ -413,6 +414,355 @@ class SonosAdvPlayerSpec extends Specification {
     received[0].type == 'playlists'
     received[0].dni == driver.device.deviceNetworkId
     received[0].records == [[id: '7', name: 'Morning & Evening', imageUrl: 'http://192.168.1.50:1400/art.jpg']]
+  }
+
+  String browseResponse(String didl, int total, int returned) {
+    return '<BrowseResponse><Result>' + StringEscapeUtils.escapeXml10(didl) + '</Result><TotalMatches>' + total +
+      '</TotalMatches><NumberReturned>' + returned + '</NumberReturned><UpdateID>1</UpdateID></BrowseResponse>'
+  }
+
+  String emptyDidl() {
+    return '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"></DIDL-Lite>'
+  }
+
+  String favoritesDidl(int first, int count) {
+    String items = (first..<(first + count)).collect { int index ->
+      '<item id="FV:2/' + index + '"><dc:title>Favorite ' + index + '</dc:title><res>x-sonos-http:song%3a' + index + '.mp4?sid=204&amp;sn=9</res></item>'
+    }.join('')
+    return '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">' + items + '</DIDL-Lite>'
+  }
+
+  void markCatalogLoaded(String catalogType) {
+    driver.withCatalogState(catalogType) { Map catalog -> catalog.loadedGeneration = catalog.generation }
+  }
+
+  void stubCatalogParent(List<Map> snapshots, List<List<Map>> avt) {
+    driver.device.metaClass.getIdAsLong = { -> 1L }
+    driver.metaClass.buildHubitatRunMethodOnclick = { Long id, String method, List args -> '' }
+    driver.metaClass.getParent = { -> new Expando(
+      putCatalogSnapshot: { String dni, String type, List<Map> records -> snapshots << [type: type, records: records] },
+      putAvtEvents: { String dni, List<Map> events, Object epoch, Object sequence -> avt << events }) }
+  }
+
+  def "an empty playlist catalog is loaded once and the rematch after it starts no new browse"() {
+    given:
+    List<Map> snapshots = []
+    List<List<Map>> avt = []
+    stubCatalogParent(snapshots, avt)
+    seedUpnpFavorite('1')
+    markCatalogLoaded('favorites')
+
+    when: 'a transport update finds no playlist catalog yet'
+    driver.sendAvtToParent([[name: 'status', value: 'playing']], [currentUri: 'x-sonos-http:song:9'], false)
+
+    then:
+    driver.asyncCalls*.cb == ['playlistsBrowseCallback']
+
+    when: 'the household has no saved playlists'
+    Map request = driver.asyncCalls.last()
+    driver.asyncCalls.clear()
+    driver.playlistsBrowseCallback(new AsyncResponse(status: 200, data: browseResponse(emptyDidl(), 0, 0)), request.data)
+
+    then: 'the empty catalog counts as loaded and the rematch does not browse again'
+    driver.asyncCalls.isEmpty()
+    driver.isCatalogLoaded('playlists')
+    driver.getPlaylistsMap().isEmpty()
+    snapshots == [[type: 'playlists', records: []]]
+    avt.size() == 2
+    driver.runtimeState.playlistsBrowseRequestId == null
+
+    when: 'later transport updates arrive'
+    3.times { driver.sendAvtToParent([[name: 'status', value: 'paused']], [currentUri: 'x-sonos-http:song:9'], false) }
+
+    then:
+    driver.asyncCalls.isEmpty()
+  }
+
+  def "an empty favorites catalog is loaded once and later transport updates do not browse again"() {
+    given:
+    List<Map> snapshots = []
+    List<List<Map>> avt = []
+    stubCatalogParent(snapshots, avt)
+    seedUpnpPlaylist('7')
+    markCatalogLoaded('playlists')
+
+    when:
+    driver.sendAvtToParent([[name: 'status', value: 'playing']], [currentUri: 'x-sonos-http:song:9'], false)
+    Map request = driver.asyncCalls.last()
+    driver.asyncCalls.clear()
+    driver.favoritesBrowseCallback(new AsyncResponse(status: 200, data: browseResponse(emptyDidl(), 0, 0)), request.data)
+    3.times { driver.sendAvtToParent([[name: 'status', value: 'paused']], [currentUri: 'x-sonos-http:song:9'], false) }
+
+    then:
+    request.cb == 'favoritesBrowseCallback'
+    driver.asyncCalls.isEmpty()
+    driver.isCatalogLoaded('favorites')
+    snapshots == [[type: 'favorites', records: []]]
+  }
+
+  def "with both catalogs empty a transport update browses each once and the rematches browse nothing"() {
+    given:
+    List<Map> snapshots = []
+    List<List<Map>> avt = []
+    stubCatalogParent(snapshots, avt)
+
+    when:
+    driver.sendAvtToParent([[name: 'status', value: 'playing']], [currentUri: 'x-sonos-http:song:9'], false)
+    List<Map> requests = new ArrayList<Map>(driver.asyncCalls)
+    driver.asyncCalls.clear()
+    driver.favoritesBrowseCallback(new AsyncResponse(status: 200, data: browseResponse(emptyDidl(), 0, 0)), requests[0].data)
+    driver.playlistsBrowseCallback(new AsyncResponse(status: 200, data: browseResponse(emptyDidl(), 0, 0)), requests[1].data)
+    driver.sendAvtToParent([[name: 'status', value: 'paused']], [currentUri: 'x-sonos-http:song:9'], false)
+
+    then:
+    requests*.cb == ['favoritesBrowseCallback', 'playlistsBrowseCallback']
+    driver.asyncCalls.isEmpty()
+    snapshots*.type == ['favorites', 'playlists']
+  }
+
+  def "a failed catalog browse is not retried by transport updates until the backoff passes"() {
+    given:
+    List<Map> snapshots = []
+    List<List<Map>> avt = []
+    stubCatalogParent(snapshots, avt)
+    seedUpnpFavorite('1')
+    markCatalogLoaded('favorites')
+
+    when:
+    driver.sendAvtToParent([[name: 'status', value: 'playing']], [currentUri: 'x-sonos-http:song:9'], false)
+    Map request = driver.asyncCalls.last()
+    driver.asyncCalls.clear()
+    driver.playlistsBrowseCallback(new AsyncResponse(status: 500, data: ''), request.data)
+    3.times { driver.sendAvtToParent([[name: 'status', value: 'paused']], [currentUri: 'x-sonos-http:song:9'], false) }
+
+    then:
+    driver.asyncCalls.isEmpty()
+    driver.runtimeState.playlistsBrowseRequestId == null
+    !driver.isCatalogLoaded('playlists')
+
+    when: 'the backoff has passed'
+    driver.runtimeState.playlistsBrowseFailedAt = System.currentTimeMillis() - driver.CATALOG_BROWSE_RETRY_MILLIS - 1L
+    driver.sendAvtToParent([[name: 'status', value: 'playing']], [currentUri: 'x-sonos-http:song:9'], false)
+
+    then:
+    driver.asyncCalls*.cb == ['playlistsBrowseCallback']
+
+    when: 'that browse fails too, and an explicit request ignores the fresh backoff'
+    Map retried = driver.asyncCalls.last()
+    driver.asyncCalls.clear()
+    driver.playlistsBrowseCallback(new AsyncResponse(status: 500, data: ''), retried.data)
+    driver.getPlaylists()
+
+    then:
+    driver.asyncCalls*.cb == ['playlistsBrowseCallback']
+  }
+
+  def "a changed ContentDirectory token makes an empty loaded catalog load again"() {
+    given:
+    driver.runtimeState.catalogRefreshOwner = false
+    driver.runtimeState.playlistsUpdateToken = 'R,1'
+    markCatalogLoaded('favorites')
+    markCatalogLoaded('playlists')
+    driver.metaClass.getParent = { -> new Expando(putAvtEvents: { String dni, List<Map> events, Object epoch, Object sequence -> }) }
+
+    when:
+    driver.handleContentDirectoryPayload('<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><SavedQueuesUpdateID>R,2</SavedQueuesUpdateID></e:property></e:propertyset>')
+
+    then:
+    !driver.isCatalogLoaded('playlists')
+    driver.isCatalogLoaded('favorites')
+
+    when:
+    driver.sendAvtToParent([[name: 'status', value: 'playing']], [currentUri: 'x-sonos-http:song:9'], false)
+
+    then:
+    driver.asyncCalls*.cb == ['playlistsBrowseCallback']
+  }
+
+  def "favorites beyond the first page keep the request ID and load every page"() {
+    given:
+    List<Map> snapshots = []
+    List<List<Map>> avt = []
+    stubCatalogParent(snapshots, avt)
+
+    when:
+    driver.getFavorites()
+    Map first = driver.asyncCalls.last()
+    driver.favoritesBrowseCallback(new AsyncResponse(status: 200, data: browseResponse(favoritesDidl(0, 100), 102, 100)), first.data)
+    Map second = driver.asyncCalls.last()
+
+    then:
+    second.cb == 'favoritesBrowseCallback'
+    second.data.requestId == first.data.requestId
+    second.data.startingIndex == 100
+    !driver.isCatalogLoaded('favorites')
+
+    when:
+    driver.favoritesBrowseCallback(new AsyncResponse(status: 200, data: browseResponse(favoritesDidl(100, 2), 102, 2)), second.data)
+
+    then:
+    driver.isCatalogLoaded('favorites')
+    driver.getFavoriteIds().size() == 102
+    snapshots.size() == 1
+    snapshots[0].records.size() == 102
+    driver.runtimeState.favoritesBrowseRequestId == null
+  }
+
+  String playlistsNotification(String token) {
+    return '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><SavedQueuesUpdateID>' + token +
+      '</SavedQueuesUpdateID></e:property></e:propertyset>'
+  }
+
+  String playlistsDidl(String id) {
+    return '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">' +
+      '<container id="SQ:' + id + '"><dc:title>Playlist ' + id + '</dc:title></container></DIDL-Lite>'
+  }
+
+  def "a late or older notification from another player does not erase a catalog the elected player refreshed"() {
+    given:
+    List<Map> snapshots = []
+    List<List<Map>> avt = []
+    stubCatalogParent(snapshots, avt)
+    driver.device.dataValues.householdId = 'Sonos_HH'
+    driver.runtimeState.catalogRefreshOwner = true
+
+    when: 'the elected player sees the new token and refreshes the household catalog'
+    driver.handleContentDirectoryPayload(playlistsNotification('RINCON_A,12'))
+    Map request = driver.asyncCalls.last()
+    driver.playlistsBrowseCallback(new AsyncResponse(status: 200, data: browseResponse(playlistsDidl('7'), 1, 1)), request.data)
+
+    then:
+    driver.isCatalogLoaded('playlists')
+    driver.getPlaylistIds() == ['7']
+
+    when: 'another player reports the same token late, then an older one'
+    driver.device.deviceNetworkId = 'SONOS-OTHER-DNI'
+    driver.runtimeState.catalogRefreshOwner = false
+    driver.asyncCalls.clear()
+    driver.handleContentDirectoryPayload(playlistsNotification('RINCON_A,12'))
+    driver.handleContentDirectoryPayload(playlistsNotification('RINCON_A,11'))
+
+    then: 'the fresh catalog stays loaded and nothing browses'
+    driver.isCatalogLoaded('playlists')
+    driver.getPlaylistIds() == ['7']
+    driver.asyncCalls.isEmpty()
+
+    when: 'a newer token arrives'
+    driver.handleContentDirectoryPayload(playlistsNotification('RINCON_A,13'))
+
+    then:
+    !driver.isCatalogLoaded('playlists')
+    driver.getPlaylistsMap().isEmpty()
+  }
+
+  def "a browse that started before the catalog changed stores nothing when it answers late"() {
+    given:
+    List<Map> snapshots = []
+    List<List<Map>> avt = []
+    stubCatalogParent(snapshots, avt)
+    driver.device.dataValues.householdId = 'Sonos_HH'
+
+    when: 'a browse starts, then the household reports a playlist change before it answers'
+    driver.getPlaylists()
+    Map stale = driver.asyncCalls.last()
+    driver.advanceCatalogToken('playlists', 'RINCON_A,20')
+    driver.playlistsBrowseCallback(new AsyncResponse(status: 200, data: browseResponse(playlistsDidl('old'), 1, 1)), stale.data)
+
+    then: 'the late result is discarded and the catalog still needs a load'
+    !driver.isCatalogLoaded('playlists')
+    driver.getPlaylistsMap().isEmpty()
+    snapshots.isEmpty()
+    avt.isEmpty()
+    driver.runtimeState.playlistsBrowseRequestId == null
+    driver.catalogLoadNeeded('playlists')
+
+    when: 'a browse at the new generation answers'
+    driver.asyncCalls.clear()
+    driver.getPlaylists()
+    Map fresh = driver.asyncCalls.last()
+    driver.playlistsBrowseCallback(new AsyncResponse(status: 200, data: browseResponse(playlistsDidl('new'), 1, 1)), fresh.data)
+
+    then:
+    driver.isCatalogLoaded('playlists')
+    driver.getPlaylistIds() == ['new']
+    snapshots*.records == [[[id: 'new', name: 'Playlist new', imageUrl: null]]]
+  }
+
+  def "a second player's transport update does not browse while another player of the household is loading"() {
+    given:
+    List<Map> snapshots = []
+    List<List<Map>> avt = []
+    stubCatalogParent(snapshots, avt)
+    driver.device.dataValues.householdId = 'Sonos_HH'
+    markCatalogLoaded('favorites')
+
+    when: 'the first player starts the household load'
+    driver.sendAvtToParent([[name: 'status', value: 'playing']], [currentUri: 'x-sonos-http:song:9'], false)
+    Map first = driver.asyncCalls.last()
+
+    and: 'a second player reports a transport update before the first response'
+    driver.device.deviceNetworkId = 'SONOS-OTHER-DNI'
+    driver.sendAvtToParent([[name: 'status', value: 'playing']], [currentUri: 'x-sonos-http:song:9'], false)
+
+    then: 'only the first player browses'
+    driver.asyncCalls*.cb == ['playlistsBrowseCallback']
+
+    when: 'the first player answers'
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.playlistsBrowseCallback(new AsyncResponse(status: 200, data: browseResponse(emptyDidl(), 0, 0)), first.data)
+    driver.device.deviceNetworkId = 'SONOS-OTHER-DNI'
+    driver.sendAvtToParent([[name: 'status', value: 'paused']], [currentUri: 'x-sonos-http:song:9'], false)
+
+    then: 'the second player sees the loaded empty catalog'
+    driver.asyncCalls*.cb == ['playlistsBrowseCallback']
+    driver.isCatalogLoaded('playlists')
+  }
+
+  def "a household browse claim that never finishes stops blocking other players after its timeout"() {
+    given:
+    driver.device.dataValues.householdId = 'Sonos_HH'
+    markCatalogLoaded('favorites')
+    driver.metaClass.getParent = { -> new Expando(putAvtEvents: { String dni, List<Map> events, Object epoch, Object sequence -> }) }
+    driver.getPlaylists()
+    driver.withCatalogState('playlists') { Map catalog ->
+      catalog.claim.startedAt = System.currentTimeMillis() - driver.CATALOG_BROWSE_CLAIM_TIMEOUT_MILLIS - 1L
+    }
+
+    when:
+    driver.device.deviceNetworkId = 'SONOS-OTHER-DNI'
+    driver.sendAvtToParent([[name: 'status', value: 'playing']], [currentUri: 'x-sonos-http:song:9'], false)
+
+    then:
+    driver.asyncCalls*.cb == ['playlistsBrowseCallback', 'playlistsBrowseCallback']
+  }
+
+  def "household update tokens from one source compare by counter"() {
+    expect:
+    driver.isOlderCatalogToken(candidate, current) == older
+
+    where:
+    candidate     | current       || older
+    'RINCON_A,9'  | 'RINCON_A,10' || true
+    'RINCON_A,10' | 'RINCON_A,9'  || false
+    'RINCON_B,1'  | 'RINCON_A,10' || false
+    'RINCON_A,x'  | 'RINCON_A,10' || false
+    'RINCON_A,1'  | null          || false
+  }
+
+  def "players in one household share a loaded catalog"() {
+    given:
+    driver.device.dataValues.householdId = 'Sonos_HH'
+    markCatalogLoaded('favorites')
+    markCatalogLoaded('playlists')
+    driver.metaClass.getParent = { -> new Expando(putAvtEvents: { String dni, List<Map> events, Object epoch, Object sequence -> }) }
+
+    when: 'another player of the household loaded both catalogs, one of them empty'
+    driver.device.deviceNetworkId = 'SONOS-OTHER-DNI'
+    driver.sendAvtToParent([[name: 'status', value: 'playing']], [currentUri: 'x-sonos-http:song:9'], false)
+
+    then:
+    driver.asyncCalls.isEmpty()
+    driver.catalogKey() == 'Sonos_HH'
   }
 
   List<Map> playerStateMessages() {
@@ -1349,8 +1699,10 @@ class SonosAdvPlayerSpec extends Specification {
       playerDeparted: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'departed', rincon:rincon, dni:dni, name:name] },
       groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }
     ) }
-    driver.clearFavoritesMap()
-    driver.clearPlaylistsMap()
+    driver.favoritesMap.clear()
+    driver.playlistsMap.clear()
+    driver.catalogStates.clear()
+    driver.runtimeStateByDni.remove('SONOS-OTHER-DNI')
     driver.pendingGroupedPlayerVolumes.clear()
   }
 

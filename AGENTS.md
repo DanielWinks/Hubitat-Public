@@ -136,6 +136,12 @@ call the ungated parent, and the parent holds nothing while it calls them. Any o
    callback, which runs in a new execution. "Writes to a child" means driver methods, child-app methods,
    `child.sendEvent`, app-level `sendEvent(dni, ...)` and `updateDataValue`. `ChildEntryPurity` follows the local call
    graph from every entry point and fails on a reachable child write.
+   **Exception: replaceable snapshots.** When the entry point stores a whole latest-wins value in app memory and the
+   callback only delivers what memory holds, use `overwrite: true` with a handler per snapshot kind and no `data`,
+   so repeated reports keep one pending job instead of one per report. Today these are the catalog snapshots
+   (`putCatalogSnapshot` → `deliverFavoritesCatalogSnapshot` / `deliverPlaylistsCatalogSnapshot`). Never use it for a
+   callback that carries an individual event, delta or command in `data` (AVT, RC, attribute updates, group
+   operations, announcements): overwrite would drop it.
 3. No `PENDING_*` queue, `*DrainScheduled` flag, received-ID dedupe, ack or retry loop exists only to carry
    child-to-app traffic. Hubitat's scheduler is the only deferral mechanism. Order comes from sequence numbers.
 4. Bridge data never becomes an attribute or location event. `sendEvent` generates an event only when the value

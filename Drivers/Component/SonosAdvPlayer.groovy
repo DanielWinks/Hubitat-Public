@@ -1013,8 +1013,21 @@ metadata {
 @Field static ConcurrentHashMap<String, Integer> subscribeRetryAttempts = new ConcurrentHashMap<String, Integer>()
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
-@Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
-@Field static ConcurrentHashMap<String, LinkedHashMap> playlistsMap = new ConcurrentHashMap<String, LinkedHashMap>()
+// Favorite and playlist catalogs are household-wide, keyed by catalogKey() (the household ID).
+@Field static ConcurrentHashMap<String, ConcurrentHashMap<String, LinkedHashMap>> favoritesMap = new ConcurrentHashMap<String, ConcurrentHashMap<String, LinkedHashMap>>()
+@Field static ConcurrentHashMap<String, ConcurrentHashMap<String, LinkedHashMap>> playlistsMap = new ConcurrentHashMap<String, ConcurrentHashMap<String, LinkedHashMap>>()
+// Household catalog state, keyed "<catalogKey>:<favorites|playlists>" and changed only under
+// synchronized(catalogStates) through withCatalogState():
+//   generation       bumped by every invalidation; a browse stores its result only if the generation is unchanged
+//   loadedGeneration the generation the stored catalog was loaded at (loaded means it equals generation), so a
+//                    household with no favorites or playlists stays loaded with an empty catalog
+//   token            the newest ContentDirectory update token any player of the household reported
+//   claim            [requestId, generation, startedAt] of the one shared browse in flight for the household
+@Field static final ConcurrentHashMap<String, Map> catalogStates = new ConcurrentHashMap<String, Map>()
+// After a failed browse, transport updates on that player wait this long before loading the catalog again.
+@Field static final Long CATALOG_BROWSE_RETRY_MILLIS = 300000L
+// A claimed browse that has not finished in this time no longer blocks other players.
+@Field static final Long CATALOG_BROWSE_CLAIM_TIMEOUT_MILLIS = 120000L
 @Field static ConcurrentHashMap<String, String> favPlaylistDelegate = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, Long> eventTimestamps = new ConcurrentHashMap<String, Long>()
 // UPnP subscription lease expiry (epoch seconds) keyed "<dni>-<subscriptionKey>". In-memory only: after a reboot or
@@ -1935,8 +1948,6 @@ void clearStaticDriverStateForCurrentDevice() {
   if(playerId != null && playerId != '') {
     groupsRegistry?.remove(playerId)
     statesRegistry?.remove(playerId)
-    favoritesMap?.remove(playerId)
-    playlistsMap?.remove(playerId)
     volumeFadeState?.remove(playerId)
     pendingGroupedPlayerVolumes?.remove(playerId)
     groupVolumeFadeState?.remove(playerId)
@@ -1980,8 +1991,9 @@ void groupsRegistryInitialization() {
 }
 
 void favoritesMapInitialization() {
-  if(!(favoritesMap instanceof ConcurrentHashMap)) { favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>() }
   // Favorite and playlist catalogs are populated through UPnP ContentDirectory Browse.
+  if(!(favoritesMap instanceof ConcurrentHashMap)) { favoritesMap = new ConcurrentHashMap<String, ConcurrentHashMap<String, LinkedHashMap>>() }
+  if(!(playlistsMap instanceof ConcurrentHashMap)) { playlistsMap = new ConcurrentHashMap<String, ConcurrentHashMap<String, LinkedHashMap>>() }
 }
 
 // =============================================================================
@@ -4298,7 +4310,8 @@ void sendAvtToParent(List<Map> events, Map matchKeys, Boolean rematch = false, M
     runtimeState.avtMatchKeys = merged
   }
   if((!newKeys.isEmpty() || rematch) && runtimeState.avtMatchKeys instanceof Map) {
-    ensureFavoritesAndPlaylistsLoaded()
+    // A rematch follows a finished catalog browse, so it never starts another one.
+    if(!rematch) { ensureFavoritesAndPlaylistsLoaded() }
     outgoing.addAll(buildFavoriteMatchEvents((Map<String, String>)runtimeState.avtMatchKeys))
   }
   if(outgoing.isEmpty()) { return }
@@ -4784,12 +4797,23 @@ String normalizeFavoriteUri(String uri) {
   return normalized
 }
 
+/** Load each catalog once per household; an empty but loaded catalog is not loaded again. */
 void ensureFavoritesAndPlaylistsLoaded() {
-  if(getFavoritesMap().isEmpty() && !getDriverStateValue('favoritesBrowseRequestId')) {
-    getFavorites()
-  }
-  if(getPlaylistsMap().isEmpty() && !getDriverStateValue('playlistsBrowseRequestId')) {
-    getPlaylists()
+  if(catalogLoadNeeded('favorites')) { getFavorites() }
+  if(catalogLoadNeeded('playlists')) { getPlaylists() }
+}
+
+/**
+ * True when the household catalog is not loaded at its current generation, no player of the household is
+ * already loading it, this player has no browse in flight and its last browse did not fail recently.
+ */
+Boolean catalogLoadNeeded(String catalogType) {
+  if(getDriverStateValue("${catalogType}BrowseRequestId".toString())) { return false }
+  Object failedAt = getDriverStateValue("${catalogType}BrowseFailedAt".toString())
+  if(failedAt instanceof Long && now() - (Long)failedAt < CATALOG_BROWSE_RETRY_MILLIS) { return false }
+  Long nowMillis = now()
+  return (Boolean)withCatalogState(catalogType) { Map catalog ->
+    !catalogStateLoaded(catalog) && !catalogClaimLive(catalog, nowMillis)
   }
 }
 
@@ -6978,7 +7002,145 @@ void publishGroupAnnouncementProgressToParent(Map payload) {
 
 
 ConcurrentHashMap<String, LinkedHashMap> getFavoritesMap() {
-  return favoritesMap
+  return catalogEntries(favoritesMap)
+}
+
+/** Catalogs are shared by a household; a player without a household ID yet keeps its own. */
+String catalogKey() {
+  String householdId = getHouseholdId()
+  return householdId ? householdId : "player:${getDeviceDNI()}".toString()
+}
+
+ConcurrentHashMap<String, LinkedHashMap> catalogEntries(ConcurrentHashMap<String, ConcurrentHashMap<String, LinkedHashMap>> catalogs) {
+  String key = catalogKey()
+  ConcurrentHashMap<String, LinkedHashMap> entries = catalogs.get(key)
+  if(entries == null) {
+    catalogs.putIfAbsent(key, new ConcurrentHashMap<String, LinkedHashMap>())
+    entries = catalogs.get(key)
+  }
+  return entries
+}
+
+/** Run one change to a household catalog's state under the catalog lock and return its result. */
+Object withCatalogState(String catalogType, Closure change) {
+  String key = "${catalogKey()}:${catalogType}".toString()
+  synchronized(catalogStates) {
+    Map catalog = catalogStates.get(key)
+    if(catalog == null) {
+      catalog = [generation: 0L]
+      catalogStates.put(key, catalog)
+    }
+    return change.call(catalog)
+  }
+}
+
+@CompileStatic
+static Boolean catalogStateLoaded(Map catalog) {
+  return catalog.loadedGeneration != null && (Long)catalog.loadedGeneration == (Long)catalog.generation
+}
+
+@CompileStatic
+static Boolean catalogClaimLive(Map catalog, Long nowMillis) {
+  Map claim = (Map)catalog.claim
+  return claim != null && (Long)claim.generation == (Long)catalog.generation &&
+      nowMillis - (Long)claim.startedAt < CATALOG_BROWSE_CLAIM_TIMEOUT_MILLIS
+}
+
+/** Whether ContentDirectory update token candidate is older than current ("<RINCON>,<counter>" from one source). */
+@CompileStatic
+static Boolean isOlderCatalogToken(String candidate, String current) {
+  if(candidate == null || current == null) { return false }
+  Integer candidateComma = candidate.lastIndexOf(',')
+  Integer currentComma = current.lastIndexOf(',')
+  if(candidateComma < 0 || currentComma < 0) { return false }
+  if(candidate.substring(0, candidateComma) != current.substring(0, currentComma)) { return false }
+  String candidateCount = candidate.substring(candidateComma + 1)
+  String currentCount = current.substring(currentComma + 1)
+  if(!candidateCount.isLong() || !currentCount.isLong()) { return false }
+  return Long.parseLong(candidateCount) < Long.parseLong(currentCount)
+}
+
+Boolean isCatalogLoaded(String catalogType) {
+  return (Boolean)withCatalogState(catalogType) { Map catalog -> catalogStateLoaded(catalog) }
+}
+
+/**
+ * Start a browse at the catalog's current generation. A shared browse claims the household's one load and
+ * returns null while another player's load for this generation is still live; an unshared browse (a player
+ * refreshing its own catalog child device) never claims.
+ */
+Long claimCatalogBrowse(String catalogType, String requestId, Boolean shared) {
+  Long nowMillis = now()
+  return (Long)withCatalogState(catalogType) { Map catalog ->
+    if(!shared) { return (Long)catalog.generation }
+    if(catalogClaimLive(catalog, nowMillis)) { return null }
+    catalog.claim = [requestId: requestId, generation: catalog.generation, startedAt: nowMillis]
+    return (Long)catalog.generation
+  }
+}
+
+/**
+ * Swap in a finished catalog in one step and mark it loaded, so readers never see a half-built catalog. A browse
+ * started before the catalog was invalidated stores nothing: a late response cannot undo a newer refresh.
+ */
+Boolean storeCatalog(String catalogType, ConcurrentHashMap<String, LinkedHashMap> entries, Long generation, String requestId) {
+  String key = catalogKey()
+  Boolean stored = (Boolean)withCatalogState(catalogType) { Map catalog ->
+    Map claim = (Map)catalog.claim
+    if(claim != null && claim.requestId == requestId) { catalog.remove('claim') }
+    if(generation == null || generation != (Long)catalog.generation) { return false }
+    householdCatalogs(catalogType).put(key, entries)
+    catalog.loadedGeneration = generation
+    return true
+  }
+  if(stored) { removeDriverStateValue("${catalogType}BrowseFailedAt".toString()) }
+  return stored
+}
+
+/** Drop a stale household catalog and advance its generation so the next transport update loads it again. */
+void invalidateCatalog(String catalogType) {
+  String key = catalogKey()
+  withCatalogState(catalogType) { Map catalog -> invalidateCatalogState(catalogType, key, catalog) }
+}
+
+void invalidateCatalogState(String catalogType, String key, Map catalog) {
+  catalog.generation = (Long)catalog.generation + 1L
+  householdCatalogs(catalogType).put(key, new ConcurrentHashMap<String, LinkedHashMap>())
+}
+
+/**
+ * The household catalog map for one type. Closures must reach the static maps through this method: inside a
+ * closure, favoritesMap and playlistsMap resolve to getFavoritesMap()/getPlaylistsMap(), one household's entries.
+ */
+ConcurrentHashMap<String, ConcurrentHashMap<String, LinkedHashMap>> householdCatalogs(String catalogType) {
+  return catalogType == 'favorites' ? favoritesMap : playlistsMap
+}
+
+/**
+ * Record a household's ContentDirectory update token. Only the first report of a newer token invalidates the
+ * catalog; a repeated or older token (for example a late notification from another player) leaves it alone.
+ */
+Boolean advanceCatalogToken(String catalogType, String token) {
+  String key = catalogKey()
+  return (Boolean)withCatalogState(catalogType) { Map catalog ->
+    String current = catalog.token?.toString()
+    if(token == current || isOlderCatalogToken(token, current)) { return false }
+    catalog.token = token
+    invalidateCatalogState(catalogType, key, catalog)
+    return true
+  }
+}
+
+/** End a browse that could not finish; transport updates on this player wait CATALOG_BROWSE_RETRY_MILLIS. */
+void recordCatalogBrowseFailure(String catalogType, String requestId) {
+  removeDriverStateValue("${catalogType}BrowseRequestId".toString())
+  removeDriverStateValue("${catalogType}BrowseItems".toString())
+  setDriverStateValue("${catalogType}BrowseFailedAt".toString(), now())
+  if(requestId == null) { return }
+  withCatalogState(catalogType) { Map catalog ->
+    Map claim = (Map)catalog.claim
+    if(claim != null && claim.requestId == requestId) { catalog.remove('claim') }
+  }
 }
 
 @CompileStatic
@@ -6995,12 +7157,8 @@ Boolean isAmazonMusicService(String serviceName) {
   return serviceName != null && serviceName.toLowerCase(Locale.ROOT).contains('amazon')
 }
 
-void clearFavoritesMap() {
-  favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
-}
-
 ConcurrentHashMap<String, LinkedHashMap> getPlaylistsMap() {
-  return playlistsMap
+  return catalogEntries(playlistsMap)
 }
 
 @CompileStatic
@@ -7059,10 +7217,6 @@ void failPendingRandomMediaLoads(String type) {
   if(pending == null) { return }
   runtimeState.pendingRandomMediaLoads = pending.findAll { String pendingType -> pendingType != type }
   logWarn("Cannot randomly load ${type}: the available ID query failed")
-}
-
-void clearPlaylistsMap() {
-  playlistsMap = new ConcurrentHashMap<String, LinkedHashMap>()
 }
 
 // =============================================================================
@@ -7280,23 +7434,30 @@ void handleContentDirectoryPayload(String xmlBody) {
       if(name && valueText != null) { events << [name: name, value: valueText] }
     }
   }
-  Boolean favoritesChanged = catalogUpdateNeeded(events, 'FavoritesUpdateID', FAVORITES_UPDATE_TOKEN_KEY)
-  Boolean playlistsChanged = catalogUpdateNeeded(events, 'SavedQueuesUpdateID', PLAYLISTS_UPDATE_TOKEN_KEY)
-  if(!isCatalogRefreshOwner()) {
-    // Non-elected players do not browse on every notification. Drop the stale local catalog so the lazy
-    // load refills it; a player with its own Favorites/Playlist child refreshes that device right away.
-    if(favoritesChanged) {
-      clearFavoritesMap()
-      if(getCreateFavoritesChildDevice() && getFavoritesChild() != null) { getFavorites() }
-    }
-    if(playlistsChanged) {
-      clearPlaylistsMap()
-      if(getCreatePlaylistChildDevice() && getPlaylistChild() != null) { getPlaylists() }
-    }
+  refreshCatalogOnNotification('favorites', events, 'FavoritesUpdateID', FAVORITES_UPDATE_TOKEN_KEY)
+  refreshCatalogOnNotification('playlists', events, 'SavedQueuesUpdateID', PLAYLISTS_UPDATE_TOKEN_KEY)
+}
+
+/**
+ * The household token decides whether the shared catalog is stale, so a late notification from one player
+ * cannot erase a catalog another player already refreshed. Each player also tracks its own token: the elected
+ * player loads the shared catalog, and a non-elected player with its own catalog child device refreshes that
+ * device. Other players rely on the lazy load from the next transport update.
+ */
+void refreshCatalogOnNotification(String catalogType, List<Map> events, String eventName, String tokenKey) {
+  String token = events.find { Map candidate -> candidate.name == eventName }?.value?.toString()
+  if(token == null) { return }
+  if(advanceCatalogToken(catalogType, token)) {
+    logDebug("${eventName} is now ${token}; the household ${catalogType} catalog is stale")
+  }
+  if(!catalogUpdateNeeded(events, eventName, tokenKey)) { return }
+  Boolean favorites = catalogType == 'favorites'
+  if(isCatalogRefreshOwner()) {
+    if(favorites) { getFavorites() } else { getPlaylists() }
     return
   }
-  if(favoritesChanged) { getFavorites() }
-  if(playlistsChanged) { getPlaylists() }
+  if(favorites && getCreateFavoritesChildDevice() && getFavoritesChild() != null) { browseFavorites(false) }
+  if(!favorites && getCreatePlaylistChildDevice() && getPlaylistChild() != null) { browsePlaylists(false) }
 }
 
 /**
@@ -7775,24 +7936,35 @@ void playerSetGroupRelativeVolume(Integer volumeDelta) {
 
 @CompileStatic
 void getFavorites() {
+  browseFavorites(true)
+}
+
+/** Browse favorites; a shared browse is the household's one load, an unshared one refreshes this player's child. */
+void browseFavorites(Boolean shared) {
   if(getDriverStateValue('favoritesBrowseRequestId')) { return }
   String host = getLocalUpnpHostForGroupOperation()
   if(!host) {
+    recordCatalogBrowseFailure('favorites', null)
     logWarn('Cannot retrieve Sonos favorites: local UPnP host is unavailable')
+    return
+  }
+  String requestId = UUID.randomUUID().toString()
+  Long generation = claimCatalogBrowse('favorites', requestId, shared)
+  if(generation == null) {
+    logDebug('Sonos favorites are already loading for this household')
     return
   }
   Map params = getSoapActionParams(host, ContentDirectory, 'Browse', [ObjectID: 'FV:2',
       BrowseFlag: 'BrowseDirectChildren', Filter: '*', StartingIndex: 0, RequestedCount: 100,
       SortCriteria: ''])
-  String requestId = UUID.randomUUID().toString()
   setDriverStateValue('favoritesBrowseRequestId', requestId)
   setDriverStateValue('favoritesBrowseItems', [])
   logDebug("Requesting Sonos favorites through ContentDirectory Browse; requestId=${requestId}")
   try {
-    postAsyncHttp('favoritesBrowseCallback', params, [requestId: requestId, host: host, startingIndex: 0])
+    postAsyncHttp('favoritesBrowseCallback', params, [requestId: requestId, host: host, startingIndex: 0,
+        generation: generation])
   } catch(Exception e) {
-    removeDriverStateValue('favoritesBrowseRequestId')
-    removeDriverStateValue('favoritesBrowseItems')
+    recordCatalogBrowseFailure('favorites', requestId)
     logWarn("Could not request Sonos favorites through UPnP: ${e.message}")
   }
 }
@@ -7800,8 +7972,7 @@ void getFavorites() {
 void favoritesBrowseCallback(AsyncResponse response, Map data = null) {
   if(data?.requestId?.toString() != getDriverStateValue('favoritesBrowseRequestId')?.toString()) { return }
   if(response?.status != 200 || response.hasError()) {
-    removeDriverStateValue('favoritesBrowseRequestId')
-    removeDriverStateValue('favoritesBrowseItems')
+    recordCatalogBrowseFailure('favorites', data.requestId?.toString())
     logWarn("Sonos favorites UPnP Browse failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
     return
   }
@@ -7862,32 +8033,44 @@ void favoritesBrowseCallback(AsyncResponse response, Map data = null) {
           [ObjectID: 'FV:2', BrowseFlag: 'BrowseDirectChildren', Filter: '*',
            StartingIndex: nextIndex, RequestedCount: 100, SortCriteria: ''])
       asynchttpPost('favoritesBrowseCallback', nextParams,
-          [requestId: requestId, host: data.host, startingIndex: nextIndex])
+          [requestId: data.requestId, host: data.host, startingIndex: nextIndex, generation: data.generation])
       return
     }
-    cacheUpnpFavorites(accumulated)
+    // Store and mark the catalog loaded first, end the request, then publish. The rematch never starts a browse.
+    Boolean stored = cacheUpnpFavorites(accumulated, data.generation != null ? (data.generation as Long) : null,
+        data.requestId?.toString())
     removeDriverStateValue('favoritesBrowseRequestId')
     removeDriverStateValue('favoritesBrowseItems')
+    if(!stored) {
+      logDebug('Discarded a Sonos favorites browse that started before the catalog changed')
+      return
+    }
     logInfo("Loaded ${accumulated.size()} Sonos favorites through UPnP (total=${total}, updateId=${findSoapBodyField(envelope, 'UpdateID') ?: 'unknown'})")
+    sendCatalogSnapshotToParent('favorites', accumulated)
+    rematchLatestUpnpPlaybackSnapshot()
     completePendingRandomMediaLoads('favorite')
   } catch(Exception e) {
-    removeDriverStateValue('favoritesBrowseRequestId')
-    removeDriverStateValue('favoritesBrowseItems')
+    recordCatalogBrowseFailure('favorites', data?.requestId?.toString())
     logWarn("Could not parse Sonos favorites UPnP Browse response: ${e.message}")
   }
 }
 
-void cacheUpnpFavorites(List<Map> favorites) {
-  clearFavoritesMap()
-  String html = '<html><body><div class="favorites-container">'
+/** Store the favorites catalog (marking it loaded), then render the favorites child device; false when superseded. */
+Boolean cacheUpnpFavorites(List<Map> favorites, Long generation, String requestId) {
+  ConcurrentHashMap<String, LinkedHashMap> entries = new ConcurrentHashMap<String, LinkedHashMap>()
   favorites?.each { Map favorite ->
     String favoriteId = favorite?.id?.toString()
     String matchObjectId = favorite?.matchObjectId?.toString()
     String serviceId = favorite?.serviceId?.toString()
     String accountId = favorite?.accountId?.toString()
     if(favoriteId && matchObjectId) {
-      getFavoritesMap()["${matchObjectId}${serviceId ?: ''}${accountId ?: ''}"] = favorite
+      entries["${matchObjectId}${serviceId ?: ''}${accountId ?: ''}".toString()] = (LinkedHashMap)favorite
     }
+  }
+  if(!storeCatalog('favorites', entries, generation, requestId)) { return false }
+  String html = '<html><body><div class="favorites-container">'
+  favorites?.each { Map favorite ->
+    String favoriteId = favorite?.id?.toString()
     if(favoriteId) {
       String onclick = buildHubitatRunMethodOnclick(device.getIdAsLong(), 'loadFavorite', [favoriteId])
       String name = StringEscapeUtils.escapeHtml4(favorite?.name?.toString() ?: "Favorite ${favoriteId}")
@@ -7897,26 +8080,39 @@ void cacheUpnpFavorites(List<Map> favorites) {
   }
   html += '</div></body></html>'
   setChildFavs(html)
-  sendCatalogSnapshotToParent('favorites', favorites)
-  rematchLatestUpnpPlaybackSnapshot()
+  return true
 }
 
-@CompileStatic
 void getPlaylists() {
+  browsePlaylists(true)
+}
+
+/** Browse playlists; a shared browse is the household's one load, an unshared one refreshes this player's child. */
+@CompileStatic
+void browsePlaylists(Boolean shared) {
   if(getDriverStateValue('playlistsBrowseRequestId')) { return }
   String host = getLocalUpnpHostForGroupOperation()
-  if(!host) { logWarn('Cannot retrieve Sonos Playlists: local UPnP host is unavailable'); return }
+  if(!host) {
+    recordCatalogBrowseFailure('playlists', null)
+    logWarn('Cannot retrieve Sonos Playlists: local UPnP host is unavailable')
+    return
+  }
+  String requestId = UUID.randomUUID().toString()
+  Long generation = claimCatalogBrowse('playlists', requestId, shared)
+  if(generation == null) {
+    logDebug('Sonos Playlists are already loading for this household')
+    return
+  }
   Map params = getSoapActionParams(host, ContentDirectory, 'Browse', [ObjectID: 'SQ:',
       BrowseFlag: 'BrowseDirectChildren', Filter: '*', StartingIndex: 0, RequestedCount: 100,
       SortCriteria: ''])
-  String requestId = UUID.randomUUID().toString()
   setDriverStateValue('playlistsBrowseRequestId', requestId)
   setDriverStateValue('playlistsBrowseItems', [])
   try {
-    postAsyncHttp('playlistsBrowseCallback', params, [requestId: requestId, host: host, startingIndex: 0])
+    postAsyncHttp('playlistsBrowseCallback', params, [requestId: requestId, host: host, startingIndex: 0,
+        generation: generation])
   } catch(Exception e) {
-    removeDriverStateValue('playlistsBrowseRequestId')
-    removeDriverStateValue('playlistsBrowseItems')
+    recordCatalogBrowseFailure('playlists', requestId)
     logWarn("Could not request Sonos Playlists through UPnP: ${e.message}")
   }
 }
@@ -7924,8 +8120,7 @@ void getPlaylists() {
 void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
   if(data?.requestId?.toString() != getDriverStateValue('playlistsBrowseRequestId')?.toString()) { return }
   if(response?.status != 200 || response.hasError()) {
-    removeDriverStateValue('playlistsBrowseRequestId')
-    removeDriverStateValue('playlistsBrowseItems')
+    recordCatalogBrowseFailure('playlists', data.requestId?.toString())
     logWarn("Sonos Playlists UPnP Browse failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
     return
   }
@@ -7965,28 +8160,36 @@ void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
           [ObjectID: 'SQ:', BrowseFlag: 'BrowseDirectChildren', Filter: '*',
            StartingIndex: nextIndex, RequestedCount: 100, SortCriteria: ''])
       asynchttpPost('playlistsBrowseCallback', nextParams,
-          [requestId: data.requestId, host: data.host, startingIndex: nextIndex])
+          [requestId: data.requestId, host: data.host, startingIndex: nextIndex, generation: data.generation])
       return
     }
-    clearPlaylistsMap()
+    // Store and mark the catalog loaded first, end the request, then publish. The rematch never starts a browse.
+    ConcurrentHashMap<String, LinkedHashMap> entries = new ConcurrentHashMap<String, LinkedHashMap>()
+    accumulated.each { Map playlist -> entries[playlist.id.toString()] = (LinkedHashMap)playlist }
+    Boolean stored = storeCatalog('playlists', entries, data.generation != null ? (data.generation as Long) : null,
+        data.requestId?.toString())
+    if(!stored) {
+      removeDriverStateValue('playlistsBrowseRequestId')
+      removeDriverStateValue('playlistsBrowseItems')
+      logDebug('Discarded a Sonos Playlists browse that started before the catalog changed')
+      return
+    }
     String html = '<html><body><div class="playlists-container">'
     accumulated.each { Map playlist ->
       String playlistId = playlist.id?.toString()
-      getPlaylistsMap()[playlistId] = playlist
       String onclick = buildHubitatRunMethodOnclick(device.getIdAsLong(), 'loadPlaylist', [playlistId])
       html += "<div onclick=\"${onclick}\"><span>${StringEscapeUtils.escapeHtml4(playlist.name?.toString() ?: "Playlist ${playlistId}")}</span></div>"
     }
     html += '</div></body></html>'
     setChildPlaylists(html)
-    sendCatalogSnapshotToParent('playlists', accumulated)
     removeDriverStateValue('playlistsBrowseRequestId')
     removeDriverStateValue('playlistsBrowseItems')
     logInfo("Loaded ${accumulated.size()} Sonos Playlists through UPnP (total=${total}, updateId=${findSoapBodyField(envelope, 'UpdateID') ?: 'unknown'})")
+    sendCatalogSnapshotToParent('playlists', accumulated)
     rematchLatestUpnpPlaybackSnapshot()
     completePendingRandomMediaLoads('playlist')
   } catch(Exception e) {
-    removeDriverStateValue('playlistsBrowseRequestId')
-    removeDriverStateValue('playlistsBrowseItems')
+    recordCatalogBrowseFailure('playlists', data?.requestId?.toString())
     logWarn("Could not parse Sonos Playlists UPnP Browse response: ${e.message}")
   }
 }

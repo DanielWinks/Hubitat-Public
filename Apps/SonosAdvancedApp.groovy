@@ -932,8 +932,21 @@ void putCatalogSnapshot(String dni, String catalogType, List<Map> records) {
   withMemoryMap(CATALOG_SNAPSHOTS_MEMORY_KEY) { Map<String, Map> snapshots ->
     snapshots[catalogType] = [dni: dni, records: new ArrayList<Map>(records)]
   }
-  runInMillis(1, 'deliverCatalogSnapshot', [overwrite: false, data: [catalogType: catalogType]])
+  scheduleCatalogSnapshotDelivery(catalogType)
 }
+
+/**
+ * The snapshot in app memory is latest-wins, so each catalog keeps at most one pending delivery: overwrite
+ * replaces a delivery that has not run yet, and every player reporting the same household catalog adds no jobs.
+ */
+void scheduleCatalogSnapshotDelivery(String catalogType) {
+  runInMillis(1, catalogType == 'favorites' ? 'deliverFavoritesCatalogSnapshot' : 'deliverPlaylistsCatalogSnapshot',
+      [overwrite: true])
+}
+
+void deliverFavoritesCatalogSnapshot() { deliverCatalogSnapshot([catalogType: 'favorites']) }
+
+void deliverPlaylistsCatalogSnapshot() { deliverCatalogSnapshot([catalogType: 'playlists']) }
 
 /** Deliver the latest snapshot for one catalog to its child app from a new execution. */
 void deliverCatalogSnapshot(Map data) {
@@ -953,7 +966,7 @@ void deliverCatalogSnapshot(Map data) {
 /** Re-deliver retained snapshots, for example after a catalog child app was just created. */
 void deliverRetainedCatalogSnapshots() {
   memoryMapCopy(CATALOG_SNAPSHOTS_MEMORY_KEY).keySet().each { String catalogType ->
-    runInMillis(1, 'deliverCatalogSnapshot', [overwrite: false, data: [catalogType: catalogType]])
+    scheduleCatalogSnapshotDelivery(catalogType)
   }
 }
 
