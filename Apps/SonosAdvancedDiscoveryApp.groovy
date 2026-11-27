@@ -41,7 +41,7 @@ import org.apache.commons.lang3.StringEscapeUtils
 
 definition(
   name: 'Sonos Advanced Controller - Discovery & Management',
-  version: '0.18.9',
+  version: '0.19.0',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   parent: 'dwinks:Sonos Advanced Controller',
