@@ -3830,6 +3830,33 @@ class SonosAdvPlayerSpec extends Specification {
     appliedVolumes == [0G, 0G]
   }
 
+  def "stop announcement commands ask the app to cancel the active clip by priority"() {
+    given:
+    captureParentAudioClipRequests()
+
+    when:
+    driver.stopAnnouncement()
+    driver.stopHighPriorityAnnouncement()
+    List<Map> requests = playerRequestMessages().findAll { Map request -> request.action == 'stopAudioClip' }
+
+    then:
+    requests*.args.highPriority == [false, true]
+  }
+
+  def "cancelAudioClip sends the Sonos cancel command for the clip id"() {
+    given:
+    List<String> sent = []
+    driver.interfaces.webSocket.metaClass.sendMessage = { String message -> sent << message }
+
+    when:
+    driver.cancelAudioClip('sonos-clip-9', 'corr-1')
+
+    then:
+    sent.size() == 1
+    sent[0].contains('cancelAudioClip')
+    sent[0].contains('sonos-clip-9')
+  }
+
   def "public optional playback volume normalizer preserves the explicit zero sentinel"() {
     expect:
     driver.normalizePublicPlaybackVolume(input) == expected

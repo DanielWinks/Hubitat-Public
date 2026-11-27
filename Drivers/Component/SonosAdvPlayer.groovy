@@ -831,6 +831,8 @@ metadata {
     [name:'Volume Level', type:"NUMBER", description:"0 uses the current/default level; -1 explicitly requests zero; 1-100 sets the level", constraints:["NUMBER"]],
     [name: 'Voice name', type: "ENUM", constraints: getCachedTTSVoiceNames(), defaultValue: getCurrentTTSVoice()]
   ]
+  command 'stopAnnouncement'
+  command 'stopHighPriorityAnnouncement'
   }
 
   preferences {
@@ -2065,6 +2067,34 @@ void playHighPriorityTrack(String uri, Object volume = null) {
     playerLoadAudioClipHighPriority(uri, normalizedVolume)
   } else {
     componentLoadStreamUrlLocal(uri, normalizedVolume, true)
+  }
+}
+
+/** Cancel this player's active regular-priority audioClip announcement, if one is playing. */
+void stopAnnouncement() {
+  requestAnnouncementStop(false)
+}
+
+/** Cancel this player's active high-priority audioClip announcement, if one is playing. */
+void stopHighPriorityAnnouncement() {
+  requestAnnouncementStop(true)
+}
+
+/** The app owns the audioClip queue, so it decides whether a matching clip is active and answers with cancelAudioClip. */
+void requestAnnouncementStop(Boolean highPriority) {
+  sendParentAppRequest('stopAudioClip', [highPriority: highPriority == true])
+}
+
+/** Parent app callback: ask Sonos to cancel one audioClip over this player's WebSocket. */
+void cancelAudioClip(String sonosClipId, String correlationId = null) {
+  if(!sonosClipId) { return }
+  Map command = [namespace: 'audioClip:1', command: 'cancelAudioClip', playerId: getId()]
+  String json = JsonOutput.toJson([command, [id: sonosClipId]])
+  try {
+    interfaces.webSocket.sendMessage(json)
+    logInfo("Requested cancelAudioClip for announcement ${correlationId ?: sonosClipId}")
+  } catch(Exception e) {
+    logWarn("Could not cancel audioClip ${sonosClipId}: ${e.message}")
   }
 }
 

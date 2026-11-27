@@ -3620,7 +3620,9 @@ class SonosAdvancedAppSpec extends Specification {
     settle()
 
     then:
-    [coordinator, follower, extra, group].every { it.reads.isEmpty() }
+    [coordinator, follower, extra].every { it.reads.isEmpty() }
+    // Delivering to the group device reads only its switch, for the active-group guard.
+    group.reads.every { String read -> read == 'currentValue:switch' }
     group.emittedAttributes().volume == 15
   }
 
@@ -4180,6 +4182,7 @@ class SonosAdvancedAppSpec extends Specification {
   def "the AVT callback applies the delta to the coordinator, every follower, and group devices by DNI"() {
     given:
     seedAvtRegistry()
+    group.currentValues.switch = 'on'
     appScript.playerPreferencesUpdated([deviceDni: 'DNI-RINCON_COORD', preferences: [disableAlbumArtEvents: false]])
 
     when:
@@ -4295,6 +4298,7 @@ class SonosAdvancedAppSpec extends Specification {
   def "AVT artwork is rendered and group preference controls only group size attributes"() {
     given:
     seedAvtRegistry()
+    group.currentValues.switch = 'on'
     appScript.playerPreferencesUpdated([deviceDni: 'DNI-RINCON_COORD', preferences: [disableAlbumArtEvents: false]])
     appScript.groupPreferencesUpdated([deviceDni: 'GROUP-DNI', preferences: [disableAlbumArtEvents: true]])
     List<Map> events = [
@@ -4318,6 +4322,216 @@ class SonosAdvancedAppSpec extends Specification {
     attrs('GROUP-DNI').albumArtLarge == 'Disabled in Preferences'
     attrs('GROUP-DNI').nextTrackAlbumArtURI.contains('<img')
     attrs('GROUP-DNI').nextTrackName == 'Man in the Box'
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // Group active-state guard (onlyUpdateWhenActive / resetAttributesWhenInactive)
+  // ---------------------------------------------------------------------------
+
+  def "group preference snapshot keeps the active-group guard settings with documented defaults"() {
+    when:
+    appScript.groupPreferencesUpdated([deviceDni: 'GROUP-DNI', preferences: [:]])
+    Map defaults = appScript.getGroupPreferenceSnapshot(group)
+    appScript.groupPreferencesUpdated([deviceDni: 'GROUP-DNI',
+      preferences: [onlyUpdateWhenActive: 'false', resetAttributesWhenInactive: false]])
+    Map saved = appScript.getGroupPreferenceSnapshot(group)
+
+    then:
+    defaults.onlyUpdateWhenActive == true
+    defaults.resetAttributesWhenInactive == true
+    saved.onlyUpdateWhenActive == false
+    saved.resetAttributesWhenInactive == false
+  }
+
+  def "inactive group drops playback attributes but still publishes membership and volume"() {
+    given:
+    group.currentValues.switch = 'off'
+
+    when:
+    appScript.queueGroupDeviceState('GROUP-DNI', [currentTrackName: 'Hidden', status: 'playing',
+      currentlyJoinedPlayers: 'Kitchen', groupVolume: 22, groupMute: 'unmuted'])
+    appScript.drainGroupStateUpdates()
+    Map attributes = group.emittedAttributes()
+
+    then:
+    !attributes.containsKey('currentTrackName')
+    !attributes.containsKey('status')
+    attributes.currentlyJoinedPlayers == 'Kitchen'
+    attributes.groupVolume == 22
+    attributes.groupMute == 'unmuted'
+  }
+
+  def "playback attributes pass through while the group is active or the guard is off"() {
+    given:
+    group.currentValues.switch = active
+    appScript.groupPreferencesUpdated([deviceDni: 'GROUP-DNI', preferences: [onlyUpdateWhenActive: guarded]])
+
+    when:
+    appScript.queueGroupDeviceState('GROUP-DNI', [currentTrackName: 'Shown'])
+    appScript.drainGroupStateUpdates()
+
+    then:
+    group.emittedAttributes().currentTrackName == 'Shown'
+
+    where:
+    active | guarded
+    'on'   | true
+    'off'  | false
+  }
+
+  def "group becoming inactive resets playback attributes unless reset is disabled"() {
+    given:
+    group.currentValues.switch = 'on'
+    appScript.groupPreferencesUpdated([deviceDni: 'GROUP-DNI',
+      preferences: [resetAttributesWhenInactive: reset]])
+    group.events.clear()
+
+    when:
+    appScript.queueGroupDeviceState('GROUP-DNI', [switch: 'off', currentlyJoinedPlayers: 'Kitchen'])
+    appScript.drainGroupStateUpdates()
+    Map attributes = group.emittedAttributes()
+
+    then:
+    attributes.switch == 'off'
+    attributes.currentTrackName == expectedTrack
+    attributes.status == expectedStatus
+
+    where:
+    reset | expectedTrack | expectedStatus
+    true  | 'n/a'         | 'inactive'
+    false | null          | null
+  }
+
+  def "group becoming active republishes the coordinator playback state directly, not through the group drain"() {
+    given:
+    group.currentValues.switch = 'off'
+    coordinator.currentValues.status = 'playing'
+    coordinator.currentValues.currentTrackName = 'Only the Good Die Young'
+    appScript.groupPreferencesUpdated([deviceDni: 'GROUP-DNI', preferences: [:]])
+
+    when:
+    appScript.queueGroupDeviceState('GROUP-DNI', [switch: 'on'])
+    appScript.drainGroupStateUpdates()
+    group.currentValues.switch = 'on'
+    group.events.clear()
+    appScript.scheduled.removeAll { List job -> job[1] == 'drainGroupStateUpdates' }
+    runScheduledCallbacks(['republishGroupPlaybackCallback'])
+
+    then:
+    group.emittedAttributes().currentTrackName == 'Only the Good Die Young'
+    group.emittedAttributes().status == 'playing'
+    !appScript.scheduled.any { List job -> job[1] == 'drainGroupStateUpdates' }
+  }
+
+  def "turning the active-group guard off fills in playback attributes from the coordinator"() {
+    given:
+    group.currentValues.switch = 'off'
+    coordinator.currentValues.currentTrackName = 'Only the Good Die Young'
+    appScript.groupPreferencesUpdated([deviceDni: 'GROUP-DNI', preferences: [onlyUpdateWhenActive: true]])
+    runScheduledCallbacks(['applyGroupGuardChangeCallback'])
+    group.events.clear()
+
+    when:
+    appScript.groupPreferencesUpdated([deviceDni: 'GROUP-DNI', preferences: [onlyUpdateWhenActive: false]])
+    runScheduledCallbacks(['applyGroupGuardChangeCallback'])
+    appScript.drainGroupStateUpdates()
+
+    then:
+    group.emittedAttributes().currentTrackName == 'Only the Good Die Young'
+  }
+
+  def "inactive group AVT fanout does not format playback events"() {
+    given:
+    seedAvtRegistry()
+    group.currentValues.switch = 'off'
+    int formatted = 0
+    appScript.metaClass.formatUpnpEventsForDni = { List<Map> events, String source, String dni, Boolean groupDevice ->
+      formatted += events.size(); []
+    }
+
+    when:
+    appScript.sendAvtEventsToDni('GROUP-DNI', [[name: 'albumArtURI', value: 'http://x/a'],
+      [name: 'currentTrackName', value: 'Hidden']], true)
+
+    then:
+    formatted == 0
+  }
+
+  def "AVT fanout skips an inactive group's playback attributes"() {
+    given:
+    seedAvtRegistry()
+    group.currentValues.switch = 'off'
+
+    when:
+    appScript.sendAvtEventsToDni('GROUP-DNI', [[name: 'currentTrackName', value: 'Hidden']], true)
+
+    then:
+    childEventsFor('GROUP-DNI').findAll { Map event -> event.name == 'currentTrackName' }.isEmpty()
+  }
+
+  def "a stop that arrives before the Sonos clip id is held and sent when the id arrives"() {
+    given:
+    appScript.saveAppMemoryMap('audioClipQueuesByPlayer', ['RINCON_COORD': [active: [
+      name: 'clip-1', correlationId: 'corr-1', priority: 'REGULAR', phase: 'POST_PENDING', posting: true]]])
+    List<List> cancels = []
+    coordinator.metaClass.cancelAudioClip = { String id, String correlation -> cancels << [id, correlation] }
+
+    when:
+    appScript.stopPlayerAudioClipCallback([playerDni: coordinator.deviceNetworkId, highPriority: false])
+
+    then:
+    cancels.isEmpty()
+    appScript.appMemoryMap('audioClipQueuesByPlayer')['RINCON_COORD'].active.stopRequested == true
+
+    when:
+    appScript.audioClipStatusCallback([dni: coordinator.deviceNetworkId, epoch: 1L, sequence: 1L,
+      status: [name: 'clip-1', id: 'sonos-clip-9', status: 'ACTIVE']])
+    runScheduledCallbacks(['stopPlayerAudioClipCallback'])
+
+    then:
+    cancels == [['sonos-clip-9', 'corr-1']]
+  }
+
+  def "a resumed clip does not keep its previous Sonos id or held stop"() {
+    given:
+    appScript.saveAppMemoryMap('audioClipQueuesByPlayer', ['RINCON_COORD': [
+      active: [name: 'high-1', priority: 'HIGH', sonosId: 'high-id'],
+      suspended: [name: 'regular-1', sonosId: 'old-id', stopRequested: true, priority: 'REGULAR', correlationId: 'c'],
+      regular: [], high: []]])
+
+    when:
+    appScript.completePlayerAudioClip('RINCON_COORD',
+      [name: 'high-1', priority: 'HIGH'], 'DONE')
+    Map resumed = appScript.appMemoryMap('audioClipQueuesByPlayer')['RINCON_COORD'].regular[0]
+
+    then:
+    !resumed.containsKey('sonosId')
+    !resumed.containsKey('stopRequested')
+    !resumed.containsKey('name')
+  }
+
+  def "stop announcement cancels only an active clip of the matching priority"() {
+    given:
+    appScript.saveAppMemoryMap('audioClipQueuesByPlayer', ['RINCON_COORD': [active: [
+      name: 'clip-1', sonosId: 'sonos-clip-9', correlationId: 'corr-1', priority: priority]]])
+    List<List> cancels = []
+    coordinator.metaClass.cancelAudioClip = { String id, String correlation -> cancels << [id, correlation] }
+
+    when:
+    appScript.playerAppRequest([version: 1, channel: 'playerAppRequest', action: 'stopAudioClip',
+      sourceDni: coordinator.deviceNetworkId, requestId: 'req-1', args: [highPriority: highPriority]])
+    runScheduledCallbacks(['stopPlayerAudioClipCallback'])
+
+    then:
+    cancels == expected
+
+    where:
+    priority | highPriority | expected
+    'HIGH'   | true         | [['sonos-clip-9', 'corr-1']]
+    'HIGH'   | false        | []
+    'REGULAR' | false       | [['sonos-clip-9', 'corr-1']]
+    'REGULAR' | true        | []
   }
 
 }

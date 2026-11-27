@@ -287,6 +287,14 @@ metadata {
       input 'disableAlbumArtEvents', 'bool',
         title: 'Disable album art URL events (albumArtSmall, albumArtMedium, albumArtLarge)',
         required: false, defaultValue: true
+      input 'onlyUpdateWhenActive', 'bool',
+        title: 'Only update state when group is active',
+        description: 'When enabled, playback state updates are skipped when the group\'s configured speakers are not all grouped together in Sonos. Reduces hub load when many groups share a coordinator.',
+        required: false, defaultValue: true
+      input 'resetAttributesWhenInactive', 'bool',
+        title: 'Reset attributes when group becomes inactive',
+        description: 'When enabled, playback attributes (track name, artist, album art, etc.) are cleared when the group\'s speakers are no longer grouped together. Shows a clean state on dashboards.',
+        required: false, defaultValue: true
     }
     section('Logging Settings') {
       input 'logLevel', 'enum',
@@ -326,6 +334,8 @@ Boolean getControlUngroupedIndividuallySetting() { return settings.controlUngrou
 Boolean getUseProportionalVolumeSetting() { return settings.useProportionalVolume != null ? settings.useProportionalVolume : true }
 Boolean getEnableTrackPositionUpdates() { return settings.enableTrackPositionUpdates != null ? settings.enableTrackPositionUpdates : false }
 Boolean getDisableAlbumArtEvents() { return settings.disableAlbumArtEvents != null ? settings.disableAlbumArtEvents : true }
+Boolean getOnlyUpdateWhenActiveSetting() { return settings.onlyUpdateWhenActive != null ? settings.onlyUpdateWhenActive : true }
+Boolean getResetAttributesWhenInactiveSetting() { return settings.resetAttributesWhenInactive != null ? settings.resetAttributesWhenInactive : true }
 
 // =============================================================================
 // Migration-Prune Helpers — whitelist-driven for-each removal
@@ -522,6 +532,8 @@ void applyInitializationDefaults() {
     settings.chimeBeforeStandardPriorityTTS = settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false
   }
   if(settings.chimeBeforeHighPriorityTTS == null) { settings.chimeBeforeHighPriorityTTS = false }
+  if(settings.onlyUpdateWhenActive == null) { settings.onlyUpdateWhenActive = true }
+  if(settings.resetAttributesWhenInactive == null) { settings.resetAttributesWhenInactive = true }
   if(settings.enableTrackPositionUpdates == null) { settings.enableTrackPositionUpdates = false }
 }
 
@@ -579,6 +591,8 @@ void sendGroupPreferencesToParent() {
     chimeBeforeHighPriorityTTS: getChimeBeforeHighPriorityTTSSetting(),
     disableAlbumArtEvents: getDisableAlbumArtEvents(),
     enableTrackPositionUpdates: getEnableTrackPositionUpdates(),
+    onlyUpdateWhenActive: getOnlyUpdateWhenActiveSetting(),
+    resetAttributesWhenInactive: getResetAttributesWhenInactiveSetting(),
     useProportionalVolume: getUseProportionalVolumeSetting(),
     controlUngroupedIndividually: getControlUngroupedIndividuallySetting()
   ]

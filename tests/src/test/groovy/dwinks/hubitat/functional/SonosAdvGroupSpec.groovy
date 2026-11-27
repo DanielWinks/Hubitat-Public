@@ -83,6 +83,8 @@ class SonosAdvGroupSpec extends Specification {
       chimeBeforeHighPriorityTTS: true,
       disableAlbumArtEvents: false,
       enableTrackPositionUpdates: true,
+      onlyUpdateWhenActive: true,
+      resetAttributesWhenInactive: true,
       useProportionalVolume: true,
       controlUngroupedIndividually: false
     ]
@@ -205,6 +207,22 @@ class SonosAdvGroupSpec extends Specification {
     update.preferences.useProportionalVolume == true
     update.preferences.controlUngroupedIndividually == false
     groupRequests().isEmpty()
+  }
+
+  def "group preference snapshot forwards the active-group guard settings"() {
+    when:
+    driver.sendGroupPreferencesToParent()
+    Map defaults = ((SonosGroupParentDouble)driver.parent).preferenceUpdates.last().preferences
+    driver.settings.onlyUpdateWhenActive = false
+    driver.settings.resetAttributesWhenInactive = false
+    driver.sendGroupPreferencesToParent()
+    Map saved = ((SonosGroupParentDouble)driver.parent).preferenceUpdates.last().preferences
+
+    then:
+    defaults.onlyUpdateWhenActive == true
+    defaults.resetAttributesWhenInactive == true
+    saved.onlyUpdateWhenActive == false
+    saved.resetAttributesWhenInactive == false
   }
 
   def "group preference snapshot reflects saved volume settings and does not queue a group command"() {

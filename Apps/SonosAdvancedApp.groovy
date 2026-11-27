@@ -376,6 +376,26 @@ preferences {
   'groupCoordinatorId', 'groupCoordinatorName', 'groupPlayerIds', 'groupMemberCount',
   'groupMemberNames', 'isGrouped', 'isGroupCoordinator'
 ] as Set<String>
+// Playback attributes a group device mirrors from its coordinator. Membership (switch, currentlyJoinedPlayers)
+// and calculated volume (groupVolume, groupMute) are never suppressed by the active-group guard.
+@Field static final Set<String> GROUP_PLAYBACK_ATTRIBUTES = [
+  'status', 'transportStatus', 'audioSource', 'audioInputFormat', 'currentTrackName', 'currentArtistName',
+  'currentAlbumName', 'albumArtURI', 'albumArtSmall', 'albumArtMedium', 'albumArtLarge', 'currentFavorite',
+  'currentPlaylist', 'currentTrackNumber', 'currentTrackDuration', 'trackDescription', 'trackData',
+  'trackPosition', 'trackPositionUpdated', 'nextArtistName', 'nextAlbumName', 'nextTrackName',
+  'nextTrackAlbumArtURI', 'queueTrackTotal', 'queueTrackPosition', 'currentRepeatOneMode',
+  'currentRepeatAllMode', 'currentShuffleMode', 'currentCrossfadeMode'
+] as Set<String>
+// Clean values a group device shows when resetAttributesWhenInactive clears it.
+@Field static final Map<String, Object> GROUP_PLAYBACK_RESET_ATTRIBUTES = [
+  status: 'inactive', transportStatus: 'stopped', trackData: '{}', trackDescription: 'n/a',
+  currentTrackDuration: 'n/a', trackPosition: 0, trackPositionUpdated: 0, currentArtistName: 'n/a',
+  currentAlbumName: 'n/a', currentTrackName: 'n/a', albumArtURI: 'n/a', albumArtSmall: 'n/a',
+  albumArtMedium: 'n/a', albumArtLarge: 'n/a', audioSource: 'n/a', currentFavorite: 'n/a',
+  currentPlaylist: 'n/a', currentTrackNumber: 0, nextArtistName: 'n/a', nextAlbumName: 'n/a',
+  nextTrackName: 'n/a', nextTrackAlbumArtURI: 'n/a', queueTrackTotal: '0', queueTrackPosition: '0',
+  currentRepeatOneMode: 'off', currentRepeatAllMode: 'off', currentCrossfadeMode: 'off', currentShuffleMode: 'off'
+]
 @Field static final Integer GROUP_STATE_DRAIN_MAX_ITEMS = 8
 @Field static final Integer GROUP_MEMBERSHIP_APPLY_BATCH_SIZE = 8
 @Field static final String GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY = 'groupMembershipApplyGenerations'
@@ -1045,15 +1065,70 @@ void groupPreferencesUpdated(Map payload) {
   Map<String, Object> preferences = normalizeGroupPreferenceSnapshot(
       payload?.preferences instanceof Map ? (Map)payload.preferences : [:])
   Boolean volumeChanged = false
+  Boolean wasGuarded = true
   mutateAppData(GROUP_PREFERENCES_BY_DNI_STATE_KEY) { Object current ->
     Map<String, Map<String, Object>> snapshots = current instanceof Map
         ? new LinkedHashMap<String, Map<String, Object>>((Map<String, Map<String, Object>>)current) : [:]
     volumeChanged = snapshots[dni]?.useProportionalVolume != preferences.useProportionalVolume ||
         snapshots[dni]?.controlUngroupedIndividually != preferences.controlUngroupedIndividually
+    wasGuarded = toBooleanPreference(snapshots[dni]?.onlyUpdateWhenActive, true)
     snapshots[dni] = preferences
     return snapshots
   }
   if(volumeChanged) { queueVolumeRecalculation([], [dni], false) }
+  if(wasGuarded != preferences.onlyUpdateWhenActive) {
+    // Group device writes happen from a new execution, never inside this child entry point.
+    runInMillis(1, 'applyGroupGuardChangeCallback', [overwrite: false, data: [dni: dni]])
+  }
+}
+
+/** The active-group guard was toggled: fill in skipped attributes when it was turned off, clear an inactive group when turned on. */
+void applyGroupGuardChangeCallback(Map data) {
+  String dni = data?.dni?.toString()
+  ChildDeviceWrapper groupDevice = dni ? getChildDevice(dni) : null
+  if(groupDevice == null) { return }
+  if(!isGroupGuardEnabled(groupDevice)) {
+    republishGroupPlayback(groupDevice)
+  } else {
+    synchronized(appLock("group:${dni}".toString())) {
+      if(groupDevice.currentValue('switch', true)?.toString() != 'on' && isGroupResetWhenInactiveEnabled(groupDevice)) {
+        sendChildAttributeEvents(groupDevice, new LinkedHashMap<String, Object>(GROUP_PLAYBACK_RESET_ATTRIBUTES))
+      }
+    }
+  }
+}
+
+Boolean isGroupGuardEnabled(ChildDeviceWrapper groupDevice) {
+  return toBooleanPreference(getGroupPreference(groupDevice, 'onlyUpdateWhenActive', true), true)
+}
+
+Boolean isGroupResetWhenInactiveEnabled(ChildDeviceWrapper groupDevice) {
+  return toBooleanPreference(getGroupPreference(groupDevice, 'resetAttributesWhenInactive', true), true)
+}
+
+/**
+ * Re-send the coordinator's current playback state to one group device. The snapshot is read and delivered while
+ * holding the coordinator's AVT publish lock and sent directly, so a live AVTransport update either precedes it
+ * (and is included) or follows it; the one-second group drain is never used for it.
+ */
+void republishGroupPlayback(ChildDeviceWrapper groupDevice) {
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  String coordinatorId = groupDevice.getDataValue('groupCoordinatorId')
+  List<String> playerIds = getAllPlayersForGroupDevice(groupDevice).unique()
+  ChildDeviceWrapper configuredCoordinator = coordinatorId ? rinconMap[coordinatorId] : null
+  ChildDeviceWrapper coordinator = resolveGroupCommandCoordinator(configuredCoordinator, playerIds, rinconMap)
+  if(coordinator == null) { return }
+  String coordinatorDni = coordinator.getDeviceNetworkId()?.toString()
+  synchronized(appLock("publish:${coordinatorDni}:avt".toString())) {
+    Map<String, Object> attributes = buildGroupPlaybackAttributes(groupDevice, coordinator)
+    attributes.keySet().retainAll { String name -> GROUP_PLAYBACK_ATTRIBUTES.contains(name) }
+    deliverGroupAttributes(groupDevice, attributes)
+  }
+}
+
+void republishGroupPlaybackCallback(Map data) {
+  ChildDeviceWrapper groupDevice = data?.dni ? getChildDevice(data.dni.toString()) : null
+  if(groupDevice != null) { republishGroupPlayback(groupDevice) }
 }
 
 Map<String, Object> normalizePlayerPreferenceSnapshot(Map values) {
@@ -1078,6 +1153,8 @@ Map<String, Object> normalizeGroupPreferenceSnapshot(Map values) {
     chimeBeforeHighPriorityTTS: toBooleanPreference(values?.chimeBeforeHighPriorityTTS, false),
     disableAlbumArtEvents: toBooleanPreference(values?.disableAlbumArtEvents, true),
     enableTrackPositionUpdates: toBooleanPreference(values?.enableTrackPositionUpdates, false),
+    onlyUpdateWhenActive: toBooleanPreference(values?.onlyUpdateWhenActive, true),
+    resetAttributesWhenInactive: toBooleanPreference(values?.resetAttributesWhenInactive, true),
     useProportionalVolume: toBooleanPreference(values?.useProportionalVolume, true),
     controlUngroupedIndividually: toBooleanPreference(values?.controlUngroupedIndividually, false)
   ]
@@ -3205,6 +3282,11 @@ Boolean playerAppRequestHandler(Object event) {
     case 'enqueueAudioClip':
       enqueuePlayerAudioClip(player, args)
       return true
+    case 'stopAudioClip':
+      // The cancel goes to the driver, so it runs from a new execution rather than inside this request.
+      runInMillis(1, 'stopPlayerAudioClipCallback', [overwrite: false,
+        data: [playerDni: playerDni, highPriority: args.highPriority == true]])
+      return true
     case 'groupRendering':
       Set<String> renderingNames = namesPassingSequence(SEQUENCE_ACCEPTED_MEMORY_KEY, "${playerDni}:grc".toString(),
           ['groupVolume', 'groupMute'].findAll { String name -> args[name] != null }, request.epoch, request.sequence, false)
@@ -3542,9 +3624,54 @@ void audioClipPostCallback(AsyncResponse response, Map data) {
       active.phase = active.phase == 'ACTIVE' ? 'ACTIVE' : 'POSTED'
       queues[playerId] = queue
       saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
+      releaseHeldAudioClipStop(playerId, active)
     } catch(Exception e) {
       logWarn("Could not parse audioClip POST response for player ${playerId}: ${e.message}")
     }
+  }
+}
+
+/**
+ * Cancel a player's active audioClip when its priority matches the stop command that was received. A stop that
+ * arrives before Sonos has supplied the clip ID is remembered on that clip and sent when the ID arrives.
+ */
+void stopPlayerAudioClipCallback(Map data) {
+  ChildDeviceWrapper player = data?.playerDni ? getChildDevice(data.playerDni.toString())
+      : (data?.playerId ? findPlayerBySonosId(data.playerId.toString()) : null)
+  String playerId = player?.getDataValue('id')?.toString()
+  if(!playerId) { return }
+  Boolean highPriority = data?.highPriority == true
+  String label = highPriority ? 'high-priority ' : ''
+  Map target = null
+  synchronized(appLock('work')) {
+    Map<String, Map> queues = appMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY)
+    Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : null
+    Map active = queue?.active instanceof Map ? (Map)queue.active : null
+    if(active != null && (active.priority == 'HIGH') == highPriority) {
+      if(active.sonosId) {
+        active.remove('stopRequested')
+        target = [sonosId: active.sonosId.toString(), correlationId: active.correlationId?.toString()]
+      } else {
+        active.stopRequested = true
+        saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
+        logDebug("Holding stop for announcement ${active.correlationId ?: 'unknown'} until Sonos reports its audioClip ID")
+        return
+      }
+    }
+  }
+  if(target == null) {
+    logDebug("No active ${label}announcement to stop on ${playerId}")
+    return
+  }
+  try { player.cancelAudioClip(target.sonosId, target.correlationId) }
+  catch(Exception e) { logWarn("Could not stop ${label}announcement on ${playerId}: ${e.message}") }
+}
+
+/** Send a held stop once the active clip has its Sonos ID. Called with appLock('work') held; schedules only. */
+void releaseHeldAudioClipStop(String playerId, Map active) {
+  if(active?.stopRequested == true && active.sonosId) {
+    runInMillis(1, 'stopPlayerAudioClipCallback', [overwrite: false,
+      data: [playerId: playerId, highPriority: active.priority == 'HIGH']])
   }
 }
 
@@ -3564,6 +3691,8 @@ void completePlayerAudioClip(String playerId, Map completed, String phase) {
       queue.remove('suspended')
       // A resumed clip gets a fresh Sonos name so late status messages cannot complete it.
       suspended.remove('name')
+      suspended.remove('sonosId')
+      suspended.remove('stopRequested')
       List<Map> regular = queue.regular instanceof List ? (List<Map>)queue.regular : []
       regular.add(0, suspended)
       queue.regular = regular
@@ -3614,6 +3743,7 @@ void audioClipStatusCallback(Map data) {
     if(phase == 'ACTIVE') { active.activeAt = now() }
     queues[playerId] = queue
     saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
+    if(phase == 'ACTIVE') { releaseHeldAudioClipStop(playerId, active) }
     String latency = phase == 'ACTIVE' && postSentAt != null ? ", postToActiveMs=${now() - postSentAt}" : ''
     logDebug("audioClip status player=${playerId}, name=${name}, id=${payload.id ?: 'pending'}, status=${phase}${latency}")
     if(phase == 'ACTIVE' && active.groupCorrelationId) {
@@ -6289,7 +6419,7 @@ void publishZgtGroupAttributes(Map<String, List<String>> followersByCoordinator)
       player?.getDataValue('name')?.toString() ?: player?.label?.toString() ?: id
     }
     String joinedPlayers = memberNames.join(', ')
-    sendChildAttributeEvents(groupDevice, [
+    deliverGroupAttributes(groupDevice, [
       currentlyJoinedPlayers: joinedPlayers,
       switch: exactMatch ? 'on' : 'off'
     ])
@@ -6596,10 +6726,27 @@ void applyAvtEvents(String coordinatorDni, List<Map> events, List<String> target
 }
 
 void sendAvtEventsToDni(String dni, List<Map> events, Boolean groupDevice) {
-  formatUpnpEventsForDni(events, null, dni, groupDevice).each { Map event ->
-    String name = event.name.toString()
-    if(!groupDevice && isPlayerAttributeDisabledByDni(dni, name)) { return }
-    sendChildEventByDni(dni, name, event.value)
+  if(!groupDevice) {
+    formatUpnpEventsForDni(events, null, dni, false).each { Map event ->
+      String name = event.name.toString()
+      if(isPlayerAttributeDisabledByDni(dni, name)) { return }
+      sendChildEventByDni(dni, name, event.value)
+    }
+    return
+  }
+  ChildDeviceWrapper group = getChildDevice(dni)
+  if(group == null) { return }
+  // The active check and the writes share the group's lock with its switch change and reset.
+  synchronized(appLock("group:${dni}".toString())) {
+    List<Map> deliverable = events
+    if(isGroupGuardEnabled(group) && group.currentValue('switch', true)?.toString() != 'on') {
+      // An inactive group takes no playback attributes, so skip formatting and artwork work; activation republishes.
+      deliverable = (events ?: []).findAll { Map event -> !GROUP_PLAYBACK_ATTRIBUTES.contains(event?.name?.toString()) }
+    }
+    if(!deliverable) { return }
+    formatUpnpEventsForDni(deliverable, null, dni, true).each { Map event ->
+      sendChildEventByDni(dni, event.name.toString(), event.value)
+    }
   }
 }
 
@@ -7681,19 +7828,9 @@ void executeGroupMuteCommand(ChildDeviceWrapper coordinator, List<ChildDeviceWra
   }
 }
 
-void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper coordinator, List<ChildDeviceWrapper> players, Map args) {
-  if(!coordinator) {
-    logWarn("Cannot refresh ${groupDevice.displayName}: coordinator not found")
-    return
-  }
-
-  Map attributes = [:]
-  // The refresh request carries the current settings; keep the cache correct for devices that
-  // have not published a snapshot yet, and seed readings from players that have not reported.
-  mergeGroupVolumePreferences(groupDevice.getDeviceNetworkId(), args)
-  seedPlayerReadings(players)
-  attributes.putAll(calculateGroupDeviceVolumeState(groupDevice, buildVolumeCalculationContext()))
-
+/** The coordinator's current playback attributes as a group device mirrors them (plus joined-player names). */
+Map<String, Object> buildGroupPlaybackAttributes(ChildDeviceWrapper groupDevice, ChildDeviceWrapper coordinator) {
+  Map<String, Object> attributes = [:]
   ['status', 'transportStatus', 'trackData', 'trackDescription', 'currentTrackDuration',
    'trackPosition', 'trackPositionUpdated',
    'currentArtistName', 'albumArtURI', 'albumArtSmall', 'albumArtMedium', 'albumArtLarge',
@@ -7724,6 +7861,23 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
   if(memberNames != null) {
     attributes.currentlyJoinedPlayers = memberNames.toString().replaceAll(/^\[|\]$/, '').trim()
   }
+  return attributes
+}
+
+void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper coordinator, List<ChildDeviceWrapper> players, Map args) {
+  if(!coordinator) {
+    logWarn("Cannot refresh ${groupDevice.displayName}: coordinator not found")
+    return
+  }
+
+  Map attributes = [:]
+  // The refresh request carries the current settings; keep the cache correct for devices that
+  // have not published a snapshot yet, and seed readings from players that have not reported.
+  mergeGroupVolumePreferences(groupDevice.getDeviceNetworkId(), args)
+  seedPlayerReadings(players)
+  attributes.putAll(calculateGroupDeviceVolumeState(groupDevice, buildVolumeCalculationContext()))
+
+  attributes.putAll(buildGroupPlaybackAttributes(groupDevice, coordinator))
   if(!attributes.isEmpty()) {
     queueGroupDeviceState(groupDevice.getDeviceNetworkId(), attributes)
   }
@@ -8024,12 +8178,36 @@ void drainGroupStateUpdates() {
       return
     }
     logDebug("Delivering group state to ${groupDni}: attributes=${attributes.keySet()}")
-    sendChildAttributeEvents(groupDevice, new LinkedHashMap<String, Object>(attributes))
+    deliverGroupAttributes(groupDevice, new LinkedHashMap<String, Object>(attributes))
     logDebug("Attempted ${attributes.size()} group state event(s) for ${groupDni}")
   }
 }
 
-/** Apply the group driver's inactive and track-position guards before app-owned events are emitted. */
+/**
+ * Emit group-device attributes through the group's preferences. With onlyUpdateWhenActive, playback attributes
+ * are dropped while the group is inactive and republished from the coordinator when it becomes active; with
+ * resetAttributesWhenInactive, playback attributes are cleared as the group goes inactive.
+ */
+void deliverGroupAttributes(ChildDeviceWrapper groupDevice, Map<String, Object> attributes) {
+  if(groupDevice == null || attributes == null || attributes.isEmpty()) { return }
+  // One lock per group orders the active check, playback writes, the switch change and the reset.
+  synchronized(appLock("group:${groupDevice.getDeviceNetworkId()}".toString())) {
+    if(!isGroupGuardEnabled(groupDevice)) {
+      sendChildAttributeEvents(groupDevice, attributes)
+      return
+    }
+    Boolean wasActive = groupDevice.currentValue('switch', true)?.toString() == 'on'
+    Boolean isActive = attributes.containsKey('switch') ? attributes.switch?.toString() == 'on' : wasActive
+    Map<String, Object> outgoing = new LinkedHashMap<String, Object>(attributes)
+    if(!isActive) { outgoing.keySet().removeAll { String name -> GROUP_PLAYBACK_ATTRIBUTES.contains(name) } }
+    sendChildAttributeEvents(groupDevice, outgoing)
+    if(wasActive && !isActive && isGroupResetWhenInactiveEnabled(groupDevice)) {
+      sendChildAttributeEvents(groupDevice, new LinkedHashMap<String, Object>(GROUP_PLAYBACK_RESET_ATTRIBUTES))
+    } else if(!wasActive && isActive) {
+      runInMillis(1, 'republishGroupPlaybackCallback', [overwrite: false, data: [dni: groupDevice.getDeviceNetworkId()?.toString()]])
+    }
+  }
+}
 
 // =============================================================================
 // Version Checking for Installed Files
