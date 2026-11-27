@@ -34,6 +34,7 @@ import groovy.json.JsonSlurper
 import groovy.util.XmlSlurper
 import groovy.util.slurpersupport.GPathResult
 import groovy.xml.MarkupBuilder
+import java.io.ByteArrayOutputStream
 import java.io.StringWriter
 import hubitat.scheduling.AsyncResponse
 import org.apache.commons.lang3.StringEscapeUtils
@@ -362,6 +363,8 @@ preferences {
 @Field static final String LOCAL_CONTROL_RETRY_DATA_KEY = '_localControlRetryRequest'
 // Hub login sessions expire; re-login when the cached cookie is older than this.
 @Field static final Long HUB_COOKIE_MAX_AGE_MS = Duration.ofMinutes(10).toMillis()
+// The hub-admin session cookie lives only in static app memory (appMemory()); a reboot or code save empties it.
+@Field static final String HUB_SESSION_MEMORY_KEY = 'hubSession'
 @Field static final String ZGT_LAST_REPORT_STATE_KEY = 'zgtLastReport'
 @Field static final String ZGT_PAYLOAD_STATE_KEY = 'zgtPayload'
 @Field static final String PLAYER_PREFERENCES_BY_DNI_STATE_KEY = 'playerPreferencesByDni'
@@ -506,11 +509,8 @@ preferences {
   'maintenanceJob',
   'pendingDriverMismatches',
   'duplicateCleanupResult',
-  'hubCookie',
-  'hubCookieTime',
   'updateCheckRequestId',
   'updateCheckStartedAt',
-  'updateCheckCookie',
   'updateJustCompleted',
 ]))
 
@@ -526,7 +526,7 @@ preferences {
   AUDIO_CLIP_QUEUES_STATE_KEY, GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY, AVT_EVENTS_BY_DNI_STATE_KEY,
   PLAYER_READINGS_STATE_KEY, GROUP_RENDERING_STATE_KEY, PENDING_GROUP_RENDERING_STATE_KEY,
   DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY, PENDING_GROUP_STATE_QUEUE_KEY, CATALOG_SNAPSHOTS_MEMORY_KEY, GROUP_COMMAND_INBOX_MEMORY_KEY,
-  UNMUTE_RESTORE_LEVELS_MEMORY_KEY
+  UNMUTE_RESTORE_LEVELS_MEMORY_KEY, HUB_SESSION_MEMORY_KEY
 ]
 @Field final List<String> ATOMIC_MIGRATED_STATE_KEYS = [
   ZGT_PAYLOAD_STATE_KEY,
@@ -1037,8 +1037,6 @@ void applyChildManagedSettings() {
   try { configureAlarmManagement() }
   catch(Exception e) { logError("Alarm management settings update failed: ${e.message}") }
   refreshPlayerAnnouncementPolicySnapshots(false)
-  scheduleUpdateCheck()
-  checkForUpdates()
 }
 
 /** Receive a complete player preference snapshot. */
@@ -7967,14 +7965,10 @@ void checkInstalledVersions() {
   state.installedVersions = []
   Map job = [id:UUID.randomUUID().toString(), stage:'login', appVersion:getCurrentVersion(), artifacts:[]]
   state.versionCheckJob = job
-  Long cookieAge = millisSince(state.hubCookieTime as Long)
-  if(state.hubCookie && cookieAge != null && cookieAge < HUB_COOKIE_MAX_AGE_MS) {
-    job.cookie = state.hubCookie
-    versionCheckRequest(job, 'appList', [uri:'http://127.0.0.1:8080', path:'/hub2/userAppTypes', headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
+  if(cachedHubCookie() != null) {
+    versionCheckRequest(job, 'appList', [uri:'http://127.0.0.1:8080', path:'/hub2/userAppTypes', headers:hubSessionHeaders(), timeout:15, ignoreSSLIssues:true])
   } else {
-    versionCheckRequest(job, 'login', [uri:'http://127.0.0.1:8080', path:'/login', requestContentType:'application/x-www-form-urlencoded',
-      body:[username:getAppPreference('hubSecurityUsername', '')?.toString() ?: '', password:getAppPreference('hubSecurityPassword', '')?.toString() ?: '', submit:'Login'],
-      followRedirects:false, textParser:true, timeout:15], 'POST')
+    versionCheckRequest(job, 'login', hubLoginParams(), 'POST')
   }
 }
 
@@ -7999,23 +7993,17 @@ void versionCheckCallback(AsyncResponse response, Map data) {
   Boolean ok = response != null && !response.hasError() && (response.status == 200 || (stage == 'login' && response.status == 302))
   try {
     if(stage == 'login') {
-      Object header = getResponseHeaderIgnoreCase(response?.headers, 'Set-Cookie')
-      if(header instanceof Collection) { header = ((Collection)header).find { it != null } }
-      String cookie = null
-      try { cookie = header?.value?.toString() } catch(Exception ignored) { cookie = null }
-      if(!cookie && header != null) { cookie = header.toString() }
-      if(!ok || !cookie) { logWarn('Version check could not authenticate to the hub'); versionCheckFinish(job); return }
-      job.cookie = cookie.split(';')[0]
-      state.hubCookie = job.cookie
-      state.hubCookieTime = now()
-      versionCheckRequest(job, 'appList', [uri:'http://127.0.0.1:8080', path:'/hub2/userAppTypes', headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
+      String cookie = ok ? extractHubCookie(response?.headers) : null
+      if(!cookie) { logWarn('Version check could not authenticate to the hub'); versionCheckFinish(job); return }
+      storeHubCookie(cookie)
+      versionCheckRequest(job, 'appList', [uri:'http://127.0.0.1:8080', path:'/hub2/userAppTypes', headers:hubSessionHeaders(), timeout:15, ignoreSSLIssues:true])
       return
     }
     if(stage == 'appList') {
       Object payload = ok ? response.getJson() : null
       Map target = payload instanceof Collection ? (Map)((Collection)payload).find { it instanceof Map && it.name == 'Sonos Advanced Controller' && it.namespace == 'dwinks' } : null
       if(!target?.id) { logWarn('Could not find app code entry; using running app version'); versionCheckManifest(job); return }
-      versionCheckRequest(job, 'appCode', [uri:'http://127.0.0.1:8080', path:'/app/ajax/code', query:[id:target.id], headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
+      versionCheckRequest(job, 'appCode', [uri:'http://127.0.0.1:8080', path:'/app/ajax/code', query:[id:target.id], headers:hubSessionHeaders(), timeout:15, ignoreSSLIssues:true])
       return
     }
     if(stage == 'appCode') {
@@ -8069,7 +8057,7 @@ void versionCheckManifest(Map job) {
 }
 
 void versionCheckDriverList(Map job) {
-  versionCheckRequest(job, 'driverList', [uri:'http://127.0.0.1:8080', path:'/device/drivers', headers:hubCookieHeaders(job.cookie as String), timeout:15])
+  versionCheckRequest(job, 'driverList', [uri:'http://127.0.0.1:8080', path:'/device/drivers', headers:hubSessionHeaders(), timeout:15])
 }
 
 void versionCheckNextArtifact(Map job) {
@@ -8080,7 +8068,7 @@ void versionCheckNextArtifact(Map job) {
   if(artifact.type == 'driver') {
     Map driver = (Map)(((Collection)(job.drivers ?: [])).find { Object entry -> entry instanceof Map && ((Map)entry).type == 'usr' && ((Map)entry).name == artifact.name && ((Map)entry).namespace == artifact.namespace } ?: [:])
     if(!driver.id) { versionCheckRecordArtifact(artifact, null, null); versionCheckNextArtifact(job); return }
-    versionCheckRequest(job, 'driverCode', [uri:'http://127.0.0.1:8080', path:'/driver/ajax/code', query:[id:driver.id], headers:hubCookieHeaders(job.cookie as String), timeout:15])
+    versionCheckRequest(job, 'driverCode', [uri:'http://127.0.0.1:8080', path:'/driver/ajax/code', query:[id:driver.id], headers:hubSessionHeaders(), timeout:15])
   }
 }
 
@@ -8175,7 +8163,7 @@ void fixDriverMismatches() {
 void cleanupDuplicates() {
   if(state.maintenanceJob instanceof Map) { logWarn('A maintenance operation is already in progress'); return }
   logInfo("Checking for duplicate apps and drivers...")
-  state.remove('hubCookie')
+  clearHubCookie()
   Map job = [id:UUID.randomUUID().toString(), op:'cleanupDuplicates', errors:[], appsRemoved:0, driversRemoved:0,
     appDeletes:[], driverDeletes:[]]
   state.maintenanceJob = job
@@ -8212,7 +8200,7 @@ void uploadBundle(Map bundle) {
       return
     }
 
-    // Upload using HPM's installFile pattern
+    // Upload using HPM's installFile pattern: a byte[] multipart body with CRLF line endings.
     String boundary = "----WebKitFormBoundaryDtoO2QfPwfhTjOuS"
     String zipFilename = "${bundle.id}-${bundle.name.replaceAll(/[^a-zA-Z0-9]/, '')}.zip"
 
@@ -8223,7 +8211,7 @@ void uploadBundle(Map bundle) {
       headers: hubCookieHeaders(cookie) + [
         'Content-Type': "multipart/form-data; boundary=${boundary}"
       ],
-      body: """--${boundary}\nContent-Disposition: form-data; name="uploadFile"; filename="${zipFilename}"\nContent-Type: application/zip\n\n${new String(zipData, 'ISO-8859-1')}\n\n--${boundary}\nContent-Disposition: form-data; name="folder"\n\n\n--${boundary}--""",
+      body: buildMultipartFileBody(boundary, 'uploadFile', zipFilename, 'application/zip', zipData, [folder: '']),
       timeout: 300,
       ignoreSSLIssues: true
     ]
@@ -8236,6 +8224,20 @@ void uploadBundle(Map bundle) {
   } catch(Exception e) {
     logError("Failed to upload bundle ${bundle.name}: ${e.message}")
   }
+}
+
+@CompileStatic
+static byte[] buildMultipartFileBody(String boundary, String fileField, String filename, String fileContentType, byte[] fileBytes, Map<String, String> fields) {
+  String crlf = '\r\n'
+  ByteArrayOutputStream out = new ByteArrayOutputStream()
+  out.write(("--${boundary}${crlf}Content-Disposition: form-data; name=\"${fileField}\"; filename=\"${filename}\"${crlf}Content-Type: ${fileContentType}${crlf}${crlf}").toString().getBytes('UTF-8'))
+  out.write(fileBytes)
+  out.write(crlf.getBytes('UTF-8'))
+  fields.each { String name, String value ->
+    out.write(("--${boundary}${crlf}Content-Disposition: form-data; name=\"${name}\"${crlf}${crlf}${value}${crlf}").toString().getBytes('UTF-8'))
+  }
+  out.write(("--${boundary}--${crlf}").toString().getBytes('UTF-8'))
+  return out.toByteArray()
 }
 
 Map downloadManifest(String url) {
@@ -8585,15 +8587,12 @@ void updateCheckCallback(AsyncResponse response, Map data) {
       return
     }
     Map next = [requestId: data.requestId, manual: data.manual, manifest: parsed]
-    Long cookieAge = millisSince(state.hubCookieTime as Long)
-    if(state.hubCookie != null && cookieAge != null && cookieAge < HUB_COOKIE_MAX_AGE_MS) {
-      state.updateCheckCookie = state.hubCookie
+    String cached = cachedHubCookie()
+    if(cached != null) {
+      next.cookie = cached
       requestUpdateCheckAppList(next)
     } else {
-      asynchttpPost('updateCheckLoginCallback', [uri: 'http://127.0.0.1:8080', path: '/login',
-        requestContentType: 'application/x-www-form-urlencoded',
-        body: [username: getAppPreference('hubSecurityUsername', '')?.toString() ?: '', password: getAppPreference('hubSecurityPassword', '')?.toString() ?: '', submit: 'Login'],
-        followRedirects: false, textParser: true, timeout: 15], next)
+      asynchttpPost('updateCheckLoginCallback', hubLoginParams(), next)
     }
   } catch(Exception e) {
     logError("Error processing update check: ${e.message}")
@@ -8604,7 +8603,6 @@ void updateCheckCallback(AsyncResponse response, Map data) {
 void finishUpdateCheckRequest() {
   state.remove('updateCheckRequestId')
   state.remove('updateCheckStartedAt')
-  state.remove('updateCheckCookie')
 }
 
 void updateCheckLoginCallback(AsyncResponse response, Map data) {
@@ -8613,21 +8611,15 @@ void updateCheckLoginCallback(AsyncResponse response, Map data) {
     completeUpdateCheck(data, getCurrentVersion())
     return
   }
-  Object header = getResponseHeaderIgnoreCase(response.headers, 'Set-Cookie')
-  if(header instanceof Collection) { header = ((Collection)header).find { it != null } }
-  String value = null
-  if(header != null) {
-    try { value = header.value?.toString() } catch(Exception ignored) { value = null }
-    if(!value) { value = header.toString() }
-  }
-  state.updateCheckCookie = value ? value.split(';')[0] : ''
+  // The cookie only travels in the callback data until the app list proves it works.
+  data.cookie = extractHubCookie(response.headers) ?: ''
   requestUpdateCheckAppList(data)
 }
 
 void requestUpdateCheckAppList(Map data) {
   try {
     asynchttpGet('updateCheckAppListCallback', [uri: 'http://127.0.0.1:8080', path: '/hub2/userAppTypes',
-      headers: hubCookieHeaders(state.updateCheckCookie as String), timeout: 15, ignoreSSLIssues: true], data)
+      headers: hubCookieHeaders(data.cookie as String), timeout: 15, ignoreSSLIssues: true], data)
   } catch(Exception e) { completeUpdateCheck(data, getCurrentVersion()) }
 }
 
@@ -8636,17 +8628,15 @@ void updateCheckAppListCallback(AsyncResponse response, Map data) {
   try {
     Object parsed = response != null && !response.hasError() && response.status == 200 ? response.getJson() : null
     if(!(parsed instanceof Collection)) {
-      state.remove('hubCookie')
-      state.remove('hubCookieTime')
+      clearHubCookie()
       completeUpdateCheck(data, getCurrentVersion())
       return
     }
-    state.hubCookie = state.updateCheckCookie
-    state.hubCookieTime = now()
+    storeHubCookie(data.cookie as String)
     Map target = parsed instanceof Collection ? (Map)((Collection)parsed).find { it instanceof Map && it.name == 'Sonos Advanced Controller' && it.namespace == 'dwinks' } : null
     if(target?.id == null) { completeUpdateCheck(data, getCurrentVersion()); return }
     asynchttpGet('updateCheckAppCodeCallback', [uri: 'http://127.0.0.1:8080', path: '/app/ajax/code',
-      headers: hubCookieHeaders(state.updateCheckCookie as String), query: [id: target.id], timeout: 15, ignoreSSLIssues: true], data)
+      headers: hubCookieHeaders(data.cookie as String), query: [id: target.id], timeout: 15, ignoreSSLIssues: true], data)
   } catch(Exception e) { completeUpdateCheck(data, getCurrentVersion()) }
 }
 
@@ -8759,9 +8749,7 @@ void maintenanceRequest(Map job, String stage, Map params, String method = 'GET'
 }
 
 void maintenanceAuthenticate(Map job) {
-  Long cookieAge = millisSince(state.hubCookieTime as Long)
-  if(state.hubCookie != null && cookieAge != null && cookieAge < HUB_COOKIE_MAX_AGE_MS) {
-    job.cookie = state.hubCookie
+  if(cachedHubCookie() != null) {
     Map pending = (Map)job.pendingRequest
     if(pending.stage == 'nextDriver') { maintenanceStartDrivers(job) }
     else if(pending.stage == 'duplicateDeletes') { maintenanceNextDuplicateDelete(job) }
@@ -8772,9 +8760,7 @@ void maintenanceAuthenticate(Map job) {
   try {
     String requestId = UUID.randomUUID().toString()
     job.activeRequestId = requestId
-    asynchttpPost('maintenanceHttpCallback', [uri:'http://127.0.0.1:8080', path:'/login', requestContentType:'application/x-www-form-urlencoded',
-      body:[username:getAppPreference('hubSecurityUsername', '')?.toString() ?: '', password:getAppPreference('hubSecurityPassword', '')?.toString() ?: '', submit:'Login'],
-      followRedirects:false, textParser:true, timeout:15], [jobId:job.id, requestId:requestId, stage:'login'])
+    asynchttpPost('maintenanceHttpCallback', hubLoginParams(), [jobId:job.id, requestId:requestId, stage:'login'])
   } catch(Exception e) { logError("Maintenance login failed to start: ${e.message}"); maintenanceAdvanceFailure(job, 'login') }
 }
 
@@ -8794,21 +8780,12 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
       if(!source) { maintenanceAdvanceFailure(job, stage); return }
       job.source = source
       if(stage == 'downloadApp') { maintenanceRequest(job, 'appList', [uri:'http://127.0.0.1:8080', path:'/hub2/userAppTypes', timeout:15, ignoreSSLIssues:true]) }
-      else { maintenanceRequest(job, 'driverList', [uri:'http://127.0.0.1:8080', path:'/device/drivers', headers:hubCookieHeaders(job.cookie as String), timeout:15]) }
+      else { maintenanceRequest(job, 'driverList', [uri:'http://127.0.0.1:8080', path:'/device/drivers', headers:hubSessionHeaders(), timeout:15]) }
       return
     }
     if(stage == 'login') {
       if(!ok) { maintenanceAdvanceFailure(job, 'login'); return }
-      Object header = getResponseHeaderIgnoreCase(response.headers, 'Set-Cookie')
-      if(header instanceof Collection) { header = ((Collection)header).find { it != null } }
-      String cookieValue = null
-      if(header != null) {
-        try { cookieValue = header.value?.toString() } catch(Exception ignored) { cookieValue = null }
-        if(!cookieValue) { cookieValue = header.toString() }
-      }
-      job.cookie = cookieValue ? cookieValue.split(';')[0] : ''
-      state.hubCookie = job.cookie
-      state.hubCookieTime = now()
+      storeHubCookie(extractHubCookie(response.headers) ?: '')
       Map pending = (Map)job.pendingRequest
       if(pending.stage == 'nextDriver') { maintenanceStartDrivers(job) }
       else if(pending.stage == 'duplicateDeletes') { maintenanceNextDuplicateDelete(job) }
@@ -8820,14 +8797,14 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
       Map target = payload instanceof Collection ? (Map)((Collection)payload).find { it instanceof Map && it.name == 'Sonos Advanced Controller' && it.namespace == 'dwinks' } : null
       if(!target?.id) { maintenanceAdvanceFailure(job, stage); return }
       job.appId = target.id
-      maintenanceRequest(job, 'appCode', [uri:'http://127.0.0.1:8080', path:'/app/ajax/code', query:[id:target.id], headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
+      maintenanceRequest(job, 'appCode', [uri:'http://127.0.0.1:8080', path:'/app/ajax/code', query:[id:target.id], headers:hubSessionHeaders(), timeout:15, ignoreSSLIssues:true])
       return
     }
     if(stage == 'duplicateApps') {
       if(!ok || !(response.getJson() instanceof Collection)) { maintenanceAdvanceFailure(job, stage); return }
       List entries = new ArrayList((Collection)response.getJson())
       job.appDeletes = duplicateCodeDeletes(entries, 'app')
-      maintenanceRequest(job, 'duplicateDrivers', [uri:'http://127.0.0.1:8080', path:'/device/drivers', headers:hubCookieHeaders(job.cookie as String), timeout:15])
+      maintenanceRequest(job, 'duplicateDrivers', [uri:'http://127.0.0.1:8080', path:'/device/drivers', headers:hubSessionHeaders(), timeout:15])
       return
     }
     if(stage == 'duplicateDrivers') {
@@ -8854,7 +8831,7 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
     if(stage == 'appCode') {
       Map payload = ok && response.getJson() instanceof Map ? (Map)response.getJson() : [:]
       if(payload.version == null) { maintenanceAdvanceFailure(job, stage); return }
-      maintenanceRequest(job, 'appUpdate', [uri:'http://127.0.0.1:8080', path:'/app/ajax/update', requestContentType:'application/x-www-form-urlencoded', headers:hubCookieHeaders(job.cookie as String), body:[id:job.appId, version:payload.version, source:job.source], timeout:300, ignoreSSLIssues:true], 'POST')
+      maintenanceRequest(job, 'appUpdate', [uri:'http://127.0.0.1:8080', path:'/app/ajax/update', requestContentType:'application/x-www-form-urlencoded', headers:hubSessionHeaders(), body:[id:job.appId, version:payload.version, source:job.source], timeout:300, ignoreSSLIssues:true], 'POST')
       return
     }
     if(stage == 'appUpdate') {
@@ -8870,17 +8847,17 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
       Object payload = ok ? response.getJson() : null
       Map target = payload instanceof Map && ((Map)payload).drivers instanceof Collection ? (Map)((Map)payload).drivers.find { it instanceof Map && it.type == 'usr' && it.name == artifact.name && it.namespace == artifact.namespace } : null
       if(!target) {
-        maintenanceRequest(job, 'driverCreate', [uri:'http://127.0.0.1:8080', path:'/driver/save', requestContentType:'application/x-www-form-urlencoded', headers:hubCookieHeaders(job.cookie as String), body:[id:'', version:'', create:'', source:job.source], timeout:300, ignoreSSLIssues:true], 'POST')
+        maintenanceRequest(job, 'driverCreate', [uri:'http://127.0.0.1:8080', path:'/driver/save', requestContentType:'application/x-www-form-urlencoded', headers:hubSessionHeaders(), body:[id:'', version:'', create:'', source:job.source], timeout:300, ignoreSSLIssues:true], 'POST')
       } else {
         job.driverId = target.id
-        maintenanceRequest(job, 'driverCode', [uri:'http://127.0.0.1:8080', path:'/driver/ajax/code', query:[id:target.id], headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
+        maintenanceRequest(job, 'driverCode', [uri:'http://127.0.0.1:8080', path:'/driver/ajax/code', query:[id:target.id], headers:hubSessionHeaders(), timeout:15, ignoreSSLIssues:true])
       }
       return
     }
     if(stage == 'driverCode') {
       Map payload = ok && response.getJson() instanceof Map ? (Map)response.getJson() : [:]
       if(payload.version == null) { maintenanceAdvanceFailure(job, stage); return }
-      maintenanceRequest(job, 'driverUpdate', [uri:'http://127.0.0.1:8080', path:'/driver/ajax/update', requestContentType:'application/x-www-form-urlencoded', headers:hubCookieHeaders(job.cookie as String), body:[id:job.driverId, version:payload.version, source:job.source], timeout:300, ignoreSSLIssues:true], 'POST')
+      maintenanceRequest(job, 'driverUpdate', [uri:'http://127.0.0.1:8080', path:'/driver/ajax/update', requestContentType:'application/x-www-form-urlencoded', headers:hubSessionHeaders(), body:[id:job.driverId, version:payload.version, source:job.source], timeout:300, ignoreSSLIssues:true], 'POST')
       return
     }
     if(stage == 'driverUpdate' || stage == 'driverCreate') {
@@ -8953,7 +8930,7 @@ void maintenanceNextDuplicateDelete(Map job) {
   logInfo("Removing duplicate ${item.kind}: ${item.name} (id: ${item.id})")
   String stage = item.kind == 'app' ? 'duplicateDeleteApp' : 'duplicateDeleteDriver'
   String path = item.kind == 'app' ? "/app/edit/deleteJsonSafe/${item.id}" : "/driver/editor/deleteJson/${item.id}"
-  maintenanceRequest(job, stage, [uri:'http://127.0.0.1:8080', path:path, headers:hubCookieHeaders(job.cookie as String), timeout:30, ignoreSSLIssues:true])
+  maintenanceRequest(job, stage, [uri:'http://127.0.0.1:8080', path:path, headers:hubSessionHeaders(), timeout:30, ignoreSSLIssues:true])
 }
 
 void maintenanceFinish(Map job) {
@@ -9379,66 +9356,82 @@ Boolean uninstallDriverCode(String driverCodeId, String cookie) {
   }
 }
 
-String login() {
-  // Reuse a recent cookie, but treat it as stale after HUB_COOKIE_MAX_AGE_MS --
-  // Hub sessions expire, so discard stale credentials before app and driver checks.
-  Long cookieAgeMs = millisSince(state.hubCookieTime as Long)
-  if(state.hubCookie != null && cookieAgeMs != null && cookieAgeMs < HUB_COOKIE_MAX_AGE_MS) {
-    logDebug("Reusing existing cookie")
-    return state.hubCookie
+/** The one definition of the hub-admin /login POST; synchronous and asynchronous callers both use it. */
+Map hubLoginParams() {
+  return [
+    uri: 'http://127.0.0.1:8080',
+    path: '/login',
+    requestContentType: 'application/x-www-form-urlencoded',
+    body: [
+      username: getAppPreference('hubSecurityUsername', '')?.toString() ?: '',
+      password: getAppPreference('hubSecurityPassword', '')?.toString() ?: '',
+      submit: 'Login'
+    ],
+    followRedirects: false,
+    textParser: true,
+    timeout: 15
+  ]
+}
+
+/** First Set-Cookie name=value pair from login response headers, or null. */
+String extractHubCookie(Object headers) {
+  Object header = getResponseHeaderIgnoreCase(headers, 'Set-Cookie')
+  if(header instanceof Collection) { header = ((Collection)header).find { it != null } }
+  if(header == null) { return null }
+  String value = null
+  try { value = header.value?.toString() } catch(Exception ignored) { value = null }
+  if(!value) { value = header.toString() }
+  return value ? value.split(';')[0] : null
+}
+
+/** The cached hub-admin cookie while it is younger than HUB_COOKIE_MAX_AGE_MS; an expired one is discarded. '' means the hub needs no login. */
+String cachedHubCookie() {
+  Object entry = appMemory().get(HUB_SESSION_MEMORY_KEY)
+  if(!(entry instanceof Map)) { return null }
+  Map session = (Map)entry
+  Long age = session.at instanceof Number ? millisSince((session.at as Number).longValue()) : null
+  if(session.cookie == null || age == null || age < 0L || age >= HUB_COOKIE_MAX_AGE_MS) {
+    clearHubCookie()
+    return null
   }
-  state.remove('hubCookie')
-  state.remove('hubCookieTime')
+  return session.cookie.toString()
+}
+
+void storeHubCookie(String cookie) {
+  appMemory().put(HUB_SESSION_MEMORY_KEY, [cookie: cookie ?: '', at: now()])
+}
+
+void clearHubCookie() {
+  appMemory().remove(HUB_SESSION_MEMORY_KEY)
+}
+
+Map hubSessionHeaders() {
+  return hubCookieHeaders(cachedHubCookie())
+}
+
+String login() {
+  // Reuse a recent cookie; sessions expire, so cachedHubCookie() discards a stale one.
+  String existing = cachedHubCookie()
+  if(existing != null) {
+    logDebug('Reusing existing cookie')
+    return existing
+  }
 
   try {
-    Map params = [
-      uri: "http://127.0.0.1:8080",
-      path: '/login',
-      requestContentType: 'application/x-www-form-urlencoded',
-      body: [
-        username: getAppPreference('hubSecurityUsername', '')?.toString() ?: '',
-        password: getAppPreference('hubSecurityPassword', '')?.toString() ?: '',
-        submit: 'Login'
-      ],
-      followRedirects: false,
-      textParser: true,
-      timeout: 15
-    ]
-
     String cookie = null
-
-    httpPost(params) { resp ->
+    httpPost(hubLoginParams()) { resp ->
       logDebug("Login response status: ${resp?.status}")
       if(resp?.status == 200 || resp?.status == 302) {
-        Object setCookieHeader = getResponseHeaderIgnoreCase(resp?.headers, 'Set-Cookie')
-        String cookieValue = null
-        if(setCookieHeader instanceof Collection) {
-          cookieValue = ((Collection)setCookieHeader).find { it != null }?.toString()
-        } else if(setCookieHeader != null) {
-          try {
-            cookieValue = setCookieHeader.value?.toString()
-          } catch(Exception ignored) {
-            cookieValue = null
-          }
-          if(!cookieValue) {
-            cookieValue = setCookieHeader.toString()
-          }
-        }
-
-        if(cookieValue) {
-          cookie = cookieValue.split(';')[0]
-          state.hubCookie = cookie  // Store for reuse like HPM
-          state.hubCookieTime = now()
-          logDebug("Got cookie: ${cookie?.take(20)}...")
+        cookie = extractHubCookie(resp?.headers)
+        if(cookie) {
+          storeHubCookie(cookie)
+          logDebug('Hub login succeeded')
+        } else if(hasUnauthenticatedHubAccess()) {
+          cookie = ''
+          storeHubCookie(cookie)
+          logDebug('Hub API access does not require a login cookie')
         } else {
-          if(hasUnauthenticatedHubAccess()) {
-            cookie = ''
-            state.hubCookie = cookie
-            state.hubCookieTime = now()
-            logDebug("Hub API access does not require a login cookie")
-          } else {
-            logWarn("No Set-Cookie header in login response")
-          }
+          logWarn('No Set-Cookie header in login response')
         }
       } else {
         logWarn("Unexpected login status: ${resp?.status}")
@@ -9446,7 +9439,7 @@ String login() {
     }
 
     if(cookie == null) {
-      logWarn("Failed to get authentication cookie")
+      logWarn('Failed to get authentication cookie')
     }
     return cookie
   } catch(Exception e) {

@@ -885,6 +885,85 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.state.containsKey('updateCheckRequestId')
   }
 
+  def "hub session cookie lives in app memory and never in state"() {
+    when:
+    appScript.checkForUpdates(true)
+    appScript.updateCheckCallback(new AsyncResponse(data: '{"version":"99.0.0"}'), appScript.asyncCalls.last().data as Map)
+    appScript.updateCheckLoginCallback(new AsyncResponse(status: 302, headers: ['Set-Cookie': 'sid=abc; Path=/']), appScript.asyncCalls.last().data as Map)
+    appScript.updateCheckAppListCallback(new AsyncResponse(data: '[{"id":42,"name":"Sonos Advanced Controller","namespace":"dwinks"}]'), appScript.asyncCalls.last().data as Map)
+
+    then:
+    appScript.cachedHubCookie() == 'sid=abc'
+    !appScript.state.containsKey('hubCookie')
+    !appScript.state.containsKey('hubCookieTime')
+    !appScript.state.containsKey('updateCheckCookie')
+    !appScript.state.toString().contains('sid=abc')
+  }
+
+  def "a fresh cached hub cookie skips the login request"() {
+    given:
+    appScript.storeHubCookie('sid=fresh')
+
+    when:
+    appScript.checkForUpdates(true)
+    appScript.updateCheckCallback(new AsyncResponse(data: '{"version":"99.0.0"}'), appScript.asyncCalls.last().data as Map)
+
+    then:
+    appScript.asyncCalls.last().cb == 'updateCheckAppListCallback'
+    appScript.asyncCalls.last().params.headers.Cookie == 'sid=fresh'
+  }
+
+  def "an expired hub cookie is discarded and every path logs in again through the shared login request"() {
+    given:
+    appScript.appMemory().put('hubSession', [cookie: 'sid=old', at: appScript.now() - appScript.HUB_COOKIE_MAX_AGE_MS - 1000L])
+
+    expect:
+    appScript.cachedHubCookie() == null
+    !appScript.appMemory().containsKey('hubSession')
+
+    when: 'the update check needs a session'
+    appScript.appMemory().put('hubSession', [cookie: 'sid=old', at: appScript.now() - appScript.HUB_COOKIE_MAX_AGE_MS - 1000L])
+    appScript.checkForUpdates(true)
+    appScript.updateCheckCallback(new AsyncResponse(data: '{"version":"99.0.0"}'), appScript.asyncCalls.last().data as Map)
+    Map updateLogin = appScript.asyncCalls.last()
+
+    then:
+    updateLogin.cb == 'updateCheckLoginCallback'
+    updateLogin.params == appScript.hubLoginParams()
+    updateLogin.params.path == '/login'
+
+    when: 'a failed app list clears the cached cookie'
+    appScript.app.metaClass.getVersion = { -> '1.0.0' }
+    appScript.storeHubCookie('sid=rejected')
+    appScript.updateCheckAppListCallback(new AsyncResponse(status: 401), [requestId: appScript.state.updateCheckRequestId, cookie: 'sid=rejected'])
+
+    then:
+    appScript.cachedHubCookie() == null
+  }
+
+  def "upload multipart body uses CRLF and carries binary bytes unchanged"() {
+    given:
+    byte[] zip = [0x50, 0x4b, 0x03, 0x04, 0x0a, 0x0d, 0xff, 0x80, 0x00] as byte[]
+
+    when:
+    byte[] body = appScript.buildMultipartFileBody('BOUND', 'uploadFile', 'a.zip', 'application/zip', zip, [folder: ''])
+    String text = new String(body, 'ISO-8859-1')
+
+    then:
+    text.startsWith('--BOUND\r\nContent-Disposition: form-data; name="uploadFile"; filename="a.zip"\r\nContent-Type: application/zip\r\n\r\n')
+    text.endsWith('\r\n--BOUND\r\nContent-Disposition: form-data; name="folder"\r\n\r\n\r\n--BOUND--\r\n')
+    !text.replace('\r\n', '').contains('\n--BOUND')
+    text.contains(new String(zip, 'ISO-8859-1'))
+  }
+
+  def "child managed settings no longer start a second update check"() {
+    when:
+    appScript.applyChildManagedSettings()
+
+    then:
+    !appScript.asyncCalls.any { it.cb == 'updateCheckCallback' }
+  }
+
   def "TTS voice refresh ignores stale responses and applies the current voice"() {
     given:
     appScript.state.ttsVoiceRefreshRequestId = 'new'
