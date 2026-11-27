@@ -44,7 +44,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Hard-coded SAC / C7 targets
 # ---------------------------------------------------------------------------
-HUB_HOST = "192.168.1.4"
+HUB_HOST = "192.168.1.3"
 
 # SAC = the discovery child app, controller app, and all component drivers.
 # The controller is published last. Paths are relative to the repository root.
