@@ -8,3 +8,4 @@ SonosXML/*
 logs
 scripts/hubitat_publish.log
 .mcp.json
+__pycache__
