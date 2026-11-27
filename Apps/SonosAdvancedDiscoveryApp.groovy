@@ -780,16 +780,22 @@ void appButtonHandler(String buttonName) {
   if(buttonName == 'removeUnselectedPlayers') { submitPlayerRemoval(); return }
   if(buttonName == 'deleteManagedGroup') { deleteManagedGroup(); return }
   if(buttonName?.startsWith('newUiDeleteGroup|')) {
-    Map row = findNewUiGroupByToken(buttonName.substring('newUiDeleteGroup|'.length))
-    if(row?.name) { app.updateSetting('managedGroupSelection', [type: 'enum', value: row.name.toString()]); deleteManagedGroup() }
+    Map row = findNewUiGroupByToken(buttonName.substring('newUiDeleteGroup|'.length()))
+    if(row?.name) {
+      // Pass the resolved name directly: updateSetting() is not guaranteed to be visible through settings in this execution.
+      app.updateSetting('managedGroupSelection', [type: 'enum', value: row.name.toString()])
+      deleteManagedGroup(row.name.toString())
+    }
     return
   }
   if(buttonName?.startsWith('newUiCreatePlayer|')) {
-    String key = buttonName.substring('newUiCreatePlayer|'.length)
+    String key = buttonName.substring('newUiCreatePlayer|'.length())
     List<String> selected = settings.playerDevices instanceof Collection ? ((Collection)settings.playerDevices).collect { Object v -> v.toString() } : []
     if(!selected.contains(key)) { selected << key }
     app.updateSetting('playerDevices', [type: 'enum', value: selected])
-    submitSelectedPlayers()
+    // A row action creates only the clicked speaker; other saved selections may be stale (offline or not rediscovered)
+    // and would make the parent reject the whole request.
+    submitSelectedPlayers([key])
     return
   }
   if(buttonName?.startsWith('newUiDeletePlayer|')) {
@@ -804,7 +810,8 @@ void appButtonHandler(String buttonName) {
     String dni = row?.discoveryKey?.toString()
     if(dni) { selected.remove(dni) }
     app.updateSetting('playerDevices', [type: 'enum', value: selected])
-    submitPlayerRemoval()
+    // Remove only the confirmed speaker; other installed speakers may be absent from the saved selection.
+    if(dni) { queuePlayerRemoval([dni]) }
     state.remove('pendingNewUiDeletePlayer')
     return
   }
@@ -909,8 +916,8 @@ void pollGroupDeviceAcknowledgement() {
   runIn(2, 'pollGroupDeviceAcknowledgement')
 }
 
-void deleteManagedGroup() {
-  String name = settings.managedGroupSelection?.toString()?.trim()
+void deleteManagedGroup(String nameOverride = null) {
+  String name = (nameOverride ?: settings.managedGroupSelection)?.toString()?.trim()
   if(!name) { return }
   Map result = parent.submitGroupManagementRequest([
     schemaVersion: 1, requestId: UUID.randomUUID().toString(), action: 'delete', name: name
@@ -927,9 +934,11 @@ void deleteManagedGroup() {
   state.groupManagementMessage = 'Group removal has been queued.'
 }
 
-void submitSelectedPlayers() {
+void submitSelectedPlayers(List<String> selectedOverride = null) {
   Map snapshot = parent.getProvisioningSnapshot() as Map ?: [:]
-  List<String> selected = settings.playerDevices instanceof Collection
+  // Button handlers pass their selection explicitly: updateSetting() is not guaranteed to be
+  // visible through settings within the same execution.
+  List<String> selected = selectedOverride != null ? selectedOverride : settings.playerDevices instanceof Collection
       ? ((Collection)settings.playerDevices).collect { Object value -> value.toString() } : new ArrayList<String>(((Map)snapshot.players ?: [:]).keySet())
   Map request = [schemaVersion: 1, requestId: UUID.randomUUID().toString(), selected: selected,
       players: copyCandidateInfoMap(discoveredSonoses), secondaries: copyCandidateInfoMap(discoveredSonosSecondaries)]
@@ -987,7 +996,10 @@ void submitPlayerRemoval() {
   List<String> existing = new ArrayList<String>(((Map)snapshot.players ?: [:]).keySet())
   List<String> selected = settings.playerDevices instanceof Collection
       ? ((Collection)settings.playerDevices).collect { Object value -> value.toString() } : existing
-  List<String> remove = existing.findAll { String dni -> !selected.contains(dni) }
+  queuePlayerRemoval(existing.findAll { String dni -> !selected.contains(dni) })
+}
+
+void queuePlayerRemoval(List<String> remove) {
   Map result = parent.submitPlayerRemovalRequest([schemaVersion: 1, requestId: UUID.randomUUID().toString(), remove: remove]) as Map
   state.playerRequestMessage = result?.accepted == true ? 'Speaker removal has been queued.' : 'Speaker removal could not be queued.'
 }

@@ -382,4 +382,142 @@ class SonosAdvancedDiscoveryAppSpec extends Specification {
     parent.provisioningRequest.players['AABBCCDDEEFF'].keySet() == ['id', 'name', 'deviceIp'] as Set
     app.state.playerRequestMessage == 'Speaker creation has been queued.'
   }
+
+  def 'add button submits only the clicked speaker and records it in the selection'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    SonosDiscoveryParentDouble parent = new SonosDiscoveryParentDouble()
+    app.parent = parent
+    app.settings.playerDevices = ['AABBCCDDEEFF']
+    app.discoveredSonoses['AABBCCDDEEFF'] = [id: 'RINCON_MAIN', name: 'Kitchen', deviceIp: '192.0.2.2']
+    app.discoveredSonoses['112233445566'] = [id: 'RINCON_NEW', name: 'Garage', deviceIp: '192.0.2.3']
+
+    when:
+    app.appButtonHandler('newUiCreatePlayer|112233445566')
+
+    then:
+    parent.provisioningRequest.selected == ['112233445566']
+    parent.provisioningRequest.players['112233445566'].id == 'RINCON_NEW'
+    app.app.updatedSettings.playerDevices == ['AABBCCDDEEFF', '112233445566']
+    app.state.playerRequestMessage == 'Speaker creation has been queued.'
+  }
+
+  def 'add button works when no speakers were selected before'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    SonosDiscoveryParentDouble parent = new SonosDiscoveryParentDouble()
+    app.parent = parent
+    app.discoveredSonoses['112233445566'] = [id: 'RINCON_NEW', name: 'Garage', deviceIp: '192.0.2.3']
+
+    when:
+    app.appButtonHandler('newUiCreatePlayer|112233445566')
+
+    then:
+    parent.provisioningRequest.selected == ['112233445566']
+  }
+
+  def 'mobile add button is normalized to the same handler'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    SonosDiscoveryParentDouble parent = new SonosDiscoveryParentDouble()
+    app.parent = parent
+    app.discoveredSonoses['112233445566'] = [id: 'RINCON_NEW', name: 'Garage', deviceIp: '192.0.2.3']
+
+    when:
+    app.appButtonHandler('newUiMobileCreatePlayer|112233445566')
+
+    then:
+    parent.provisioningRequest.selected == ['112233445566']
+  }
+
+  def 'delete button only stages the speaker until removal is confirmed'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    SonosDiscoveryParentDouble parent = new SonosDiscoveryParentDouble()
+    app.parent = parent
+
+    when:
+    app.appButtonHandler('newUiDeletePlayer|AABBCCDDEEFF')
+
+    then:
+    app.state.pendingNewUiDeletePlayer == 'AABBCCDDEEFF'
+    !parent.removalRequest
+
+    when:
+    app.appButtonHandler('btnCancelNewUiDeletePlayer')
+
+    then:
+    !app.state.pendingNewUiDeletePlayer
+    !parent.removalRequest
+  }
+
+  def 'confirming a staged delete removes only that speaker'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    SonosDiscoveryParentDouble parent = new SonosDiscoveryParentDouble()
+    parent.snapshot = [players: [AABBCCDDEEFF: 'Kitchen', '112233445566': 'Garage'], playerRows: [], playerNames: [:], groups: []]
+    app.parent = parent
+    app.settings.playerDevices = ['AABBCCDDEEFF', '112233445566']
+    app.discoveredSonoses['AABBCCDDEEFF'] = [id: 'RINCON_MAIN', name: 'Kitchen', deviceIp: '192.0.2.2']
+    app.discoveredSonoses['112233445566'] = [id: 'RINCON_NEW', name: 'Garage', deviceIp: '192.0.2.3']
+    app.state.pendingNewUiDeletePlayer = '112233445566'
+
+    when:
+    app.appButtonHandler('btnConfirmNewUiDeletePlayer')
+
+    then:
+    parent.removalRequest.remove == ['112233445566']
+    !app.state.pendingNewUiDeletePlayer
+  }
+
+  def 'group delete button deletes the clicked group even when another is already selected'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    SonosDiscoveryParentDouble parent = new SonosDiscoveryParentDouble()
+    app.parent = parent
+    app.state.groupConfigurations = [Family: [groupCoordinatorId: 'RINCON_MAIN', playerIds: ['RINCON_FOLLOW']],
+      Party: [groupCoordinatorId: 'RINCON_MAIN', playerIds: ['RINCON_FOLLOW']]]
+    app.settings.managedGroupSelection = 'Party'
+    String token = app.newUiGroupToken('Family')
+
+    when:
+    app.appButtonHandler('newUiDeleteGroup|' + token)
+
+    then:
+    parent.groupManagementRequest.action == 'delete'
+    parent.groupManagementRequest.name == 'Family'
+    app.state.groupConfigurations.keySet() == ['Party'] as Set
+  }
+
+  def 'add button submits only the clicked speaker even when a stale selection exists'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    SonosDiscoveryParentDouble parent = new SonosDiscoveryParentDouble()
+    app.parent = parent
+    app.settings.playerDevices = ['OFFLINE000000']
+    app.discoveredSonoses['112233445566'] = [id: 'RINCON_NEW', name: 'Garage', deviceIp: '192.0.2.3']
+
+    when:
+    app.appButtonHandler('newUiCreatePlayer|112233445566')
+
+    then:
+    parent.provisioningRequest.selected == ['112233445566']
+  }
+
+  def 'confirming a delete removes only that speaker even when others are absent from the saved selection'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    SonosDiscoveryParentDouble parent = new SonosDiscoveryParentDouble()
+    parent.snapshot = [players: [AABBCCDDEEFF: 'Kitchen', '112233445566': 'Garage'], playerRows: [], playerNames: [:], groups: []]
+    app.parent = parent
+    app.settings.playerDevices = ['AABBCCDDEEFF']
+    app.discoveredSonoses['AABBCCDDEEFF'] = [id: 'RINCON_MAIN', name: 'Kitchen', deviceIp: '192.0.2.2']
+    app.state.pendingNewUiDeletePlayer = 'AABBCCDDEEFF'
+
+    when:
+    app.appButtonHandler('btnConfirmNewUiDeletePlayer')
+
+    then:
+    parent.removalRequest.remove == ['AABBCCDDEEFF']
+  }
 }

@@ -22,6 +22,7 @@ Groovy's own AST, and runs a pipeline of rules:
 | `CapabilityRequiredMethods` | For each `capability 'X'`, verifies the methods Hubitat expects (e.g. `Switch` → `on()`+`off()`) are defined locally or via an `#include`'d library. Catalog lives in `hubitat-capability-methods.txt` |
 | `DuplicateMethod` | Two methods with the same signature in the merged class - host vs `#include`'d library, library vs library, or the same `#include` listed twice |
 | `DuplicateField`  | `@Field` declarations that would collide when libraries are merged into the host class |
+| `StringLengthProperty` | `value.length` (property form) on a known String (literal, GString, `substring()`/`trim()` result, or a `String`-typed variable/parameter), which throws `MissingPropertyException` at runtime; use `length()` |
 | `Sandbox`         | `package` declarations, `System.exit`, `System.nanoTime`, `System.getenv`, `Runtime.exec`, `new File`, reflection (`Class.forName`), `@Grab`/`@Grapes` |
 
 Cross-file resolution: before running rules, the linter parses every file and

@@ -14,6 +14,7 @@ import dwinks.hubitat.lint.rules.MetadataRule
 import dwinks.hubitat.lint.rules.MethodReferenceRule
 import dwinks.hubitat.lint.rules.Rule
 import dwinks.hubitat.lint.rules.SandboxRule
+import dwinks.hubitat.lint.rules.StringLengthPropertyRule
 import dwinks.hubitat.lint.rules.SyntaxRule
 import groovy.transform.CompileStatic
 
@@ -71,7 +72,8 @@ class HubitatLinter {
       new DuplicateMethodRule(),
       new DuplicateFieldRule(),
       new ConcurrencyRule(),
-      new SandboxRule()
+      new SandboxRule(),
+      new StringLengthPropertyRule()
     ]
 
     // Two-pass: parse everything first so library symbols can be resolved
