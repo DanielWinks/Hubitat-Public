@@ -57,7 +57,7 @@ void logTrace(String message) {
 metadata {
   definition(
     name: 'Sonos Advanced Secondaries',
-    version: '0.19.1',
+    version: '0.19.2',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
