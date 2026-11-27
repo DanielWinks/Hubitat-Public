@@ -2882,6 +2882,70 @@ class SonosAdvancedAppSpec extends Specification {
     restored << [true, false]
   }
 
+  def "coordinator playback restore runs after appLock('work') is released"() {
+    given:
+    Boolean lockHeldDuringDriverCall = null
+    coordinator.metaClass.restoreGroupAnnouncementPlayback = { String correlationId ->
+      lockHeldDuringDriverCall = Thread.holdsLock(appScript.appLock('work'))
+    }
+    appScript.appMemory()['groupAnnouncementQueues'] = ['GROUP-DNI': [
+      active: [correlationId: 'restore-me', mode: 'COORDINATOR_STREAM', coordinatorId: 'RINCON_COORD'],
+      pending: []]]
+
+    when:
+    appScript.finishGroupAnnouncement('GROUP-DNI', 'restore-me', 'DONE')
+
+    then:
+    lockHeldDuringDriverCall == false
+    appScript.appMemoryMap('groupAnnouncementQueues')['GROUP-DNI'].active.playbackRestorePending == true
+  }
+
+  def "a failing coordinator restore call completes the announcement instead of stalling the queue"() {
+    given:
+    coordinator.metaClass.restoreGroupAnnouncementPlayback = { String correlationId -> throw new IllegalStateException('driver down') }
+    appScript.appMemory()['groupAnnouncementQueues'] = ['GROUP-DNI': [
+      active: [correlationId: 'restore-me', mode: 'COORDINATOR_STREAM', coordinatorId: 'RINCON_COORD'],
+      pending: []]]
+
+    when:
+    appScript.finishGroupAnnouncement('GROUP-DNI', 'restore-me', 'DONE')
+
+    then:
+    appScript.appMemoryMap('groupAnnouncementQueues')['GROUP-DNI'].active == null
+    appScript.scheduled.any { List job -> job[1] == 'startNextGroupAnnouncementCallback' }
+  }
+
+  def "Line-In source resolution prefers exact names, rejects ambiguous partial names and ignores non-player devices"() {
+    given:
+    coordinator.dataValues.capabilities = 'LINE_IN'
+    follower.dataValues.name = 'Kitchen'
+    follower.label = 'Kitchen'
+    follower.dataValues.capabilities = 'LINE_IN'
+    extra.dataValues.name = 'Kitchen Sub'
+    extra.label = 'Kitchen Sub'
+    extra.dataValues.capabilities = 'LINE_IN'
+    coordinator.dataValues.name = 'Living Room'
+    coordinator.label = 'Living Room'
+
+    expect:
+    appScript.resolveLineInSourceRincon(coordinator, 'kitchen') == 'RINCON_FOLLOW'
+    appScript.resolveLineInSourceRincon(coordinator, 'Kitchen Sub') == 'RINCON_EXTRA'
+    appScript.resolveLineInSourceRincon(coordinator, 'RINCON_EXTRA') == 'RINCON_EXTRA'
+    appScript.resolveLineInSourceRincon(coordinator, '192.0.2.10') == 'RINCON_COORD'
+    appScript.resolveLineInSourceRincon(coordinator, 'Living') == 'RINCON_COORD'
+    appScript.resolveLineInSourceRincon(coordinator, 'itchen S') == 'RINCON_EXTRA'
+
+    when:
+    extra.label = 'Kitchen Island'
+    extra.dataValues.name = 'Kitchen Island'
+    follower.label = 'Kitchen Bar'
+    follower.dataValues.name = 'Kitchen Bar'
+
+    then:
+    appScript.resolveLineInSourceRincon(coordinator, 'Kitchen') == null
+    appScript.resolveLineInSourceRincon(coordinator, 'Nowhere') == null
+  }
+
   def "expired queued announcements are discarded before dispatch"() {
     given:
     makeAnnouncementRosterExact()
@@ -3914,6 +3978,16 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.appMemoryMap('groupAnnouncementQueues')['GROUP-DNI'].active == null
     appScript.logs.any { String entry -> entry.contains('completion grace expired') && entry.contains('RINCON_FOLLOW') }
     appScript.logs.any { String entry -> entry.contains('finished (DONE)') }
+  }
+
+  def "stereo companion is the single same-model secondary, never a sub or surround"() {
+    expect:
+    appScript.selectStereoCompanionSecondary('Era 100', [[id: 'R', deviceIp: '10.0.0.2', modelName: 'Era 100']]).id == 'R'
+    appScript.selectStereoCompanionSecondary('Arc', [[id: 'S', deviceIp: '10.0.0.3', modelName: 'Sub Mini']]) == null
+    appScript.selectStereoCompanionSecondary('Arc', []) == null
+    appScript.selectStereoCompanionSecondary(null, [[id: 'R', deviceIp: '10.0.0.2', modelName: 'Era 100']]) == null
+    appScript.selectStereoCompanionSecondary('Era 100', [[id: 'R', deviceIp: '10.0.0.2', modelName: 'Era 100'],
+        [id: 'R2', deviceIp: '10.0.0.4', modelName: 'Era 100']]) == null
   }
 
   def "player provisioning request is validated, queued, and deferred by the parent"() {

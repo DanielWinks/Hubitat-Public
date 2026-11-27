@@ -2513,6 +2513,14 @@ Integer createPlayerDevicesFromProvisioning(List<String> selectedPlayerDevices,
       cd.updateDataValue('secondaryDeviceIps', ips.join(','))
       cd.updateDataValue('secondaryIds', ids.join(','))
     }
+    Map stereoCompanion = selectStereoCompanionSecondary(playerInfo.modelName?.toString(), secondaries)
+    if(stereoCompanion != null) {
+      cd.updateDataValue('rightChannelId', stereoCompanion.id.toString())
+      cd.updateDataValue('rightChannelDeviceIp', stereoCompanion.deviceIp.toString())
+    } else {
+      cd.removeDataValue('rightChannelId')
+      cd.removeDataValue('rightChannelDeviceIp')
+    }
     List<String> critical = ['id', 'deviceIp']
     List<String> missing = critical.findAll { String key -> !cd.getDataValue(key)?.toString() }
     if(missing) {
@@ -2559,6 +2567,20 @@ void removeOrphans() {
 // =============================================================================
 
 
+
+/**
+ * A stereo pair is two speakers of the same model; subs and surrounds are other models.
+ * Returns the secondary that is the pair's right channel, or null when none (or ambiguous).
+ */
+@CompileStatic
+static Map selectStereoCompanionSecondary(String primaryModelName, List<Map> secondaries) {
+  if(!primaryModelName || secondaries == null) { return null }
+  List<Map> matches = secondaries.findAll { Map secondary ->
+    secondary?.get('modelName')?.toString() == primaryModelName &&
+        secondary.get('id') && secondary.get('deviceIp')
+  }
+  return matches.size() == 1 ? matches[0] : null
+}
 
 /** Split using the same character-delimiter and empty-token rules as Groovy tokenize(). */
 List<String> splitTokens(String value, String delimiters) {
@@ -2786,7 +2808,7 @@ ChildDeviceWrapper getDeviceFromRincon(String rincon) {
   return app.getChildDevices().find { it.getDataValue('id') == rincon }
 }
 
-/** Resolve and validate a Line-In source in the controller, where sibling lookup is serialized. */
+/** Resolve and validate a Line-In source among the managed player devices; an ambiguous name is rejected. */
 String resolveLineInSourceRincon(ChildDeviceWrapper coordinator, String sourceIdentifier) {
   String identifier = sourceIdentifier?.trim()
   if(!identifier) {
@@ -2798,22 +2820,32 @@ String resolveLineInSourceRincon(ChildDeviceWrapper coordinator, String sourceId
     return coordinator.getDataValue('id') as String
   }
 
-  List<ChildDeviceWrapper> children = app.getChildDevices()
-  ChildDeviceWrapper source
+  List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
+  List<ChildDeviceWrapper> matches
   if(identifier.startsWith('RINCON_')) {
-    source = children.find { ChildDeviceWrapper child -> child.getDataValue('id') == identifier }
+    matches = players.findAll { ChildDeviceWrapper child -> child.getDataValue('id') == identifier }
   } else if(identifier.matches('^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$')) {
-    source = children.find { ChildDeviceWrapper child -> child.getDataValue('deviceIp') == identifier }
+    matches = players.findAll { ChildDeviceWrapper child -> child.getDataValue('deviceIp') == identifier }
   } else {
     String lowerIdentifier = identifier.toLowerCase(Locale.ROOT)
-    source = children.find { ChildDeviceWrapper child ->
-      child.getDataValue('name')?.toString()?.toLowerCase(Locale.ROOT)?.contains(lowerIdentifier)
+    // An exact name or label wins over a partial one, so "Kitchen" is not hijacked by "Kitchen Sub".
+    matches = players.findAll { ChildDeviceWrapper child ->
+      child.getDataValue('name')?.toString()?.toLowerCase(Locale.ROOT) == lowerIdentifier ||
+          child.label?.toLowerCase(Locale.ROOT) == lowerIdentifier
     }
-    if(source == null) {
-      source = children.find { ChildDeviceWrapper child -> child.label?.toLowerCase(Locale.ROOT)?.contains(lowerIdentifier) }
+    if(matches.isEmpty()) {
+      matches = players.findAll { ChildDeviceWrapper child ->
+        child.getDataValue('name')?.toString()?.toLowerCase(Locale.ROOT)?.contains(lowerIdentifier) ||
+            child.label?.toLowerCase(Locale.ROOT)?.contains(lowerIdentifier)
+      }
     }
   }
 
+  if(matches.size() > 1) {
+    logWarn("Line-In source '${identifier}' is ambiguous; no Line-In source was selected")
+    return null
+  }
+  ChildDeviceWrapper source = matches.isEmpty() ? null : matches[0]
   if(source == null) {
     logWarn("Cannot resolve Line-In source '${identifier}'")
     return null
@@ -3681,6 +3713,7 @@ void completePlayerAudioClipCallback(Map data) {
 }
 
 void completePlayerAudioClip(String playerId, Map completed, String phase) {
+  Boolean completedActive = false
   synchronized(appLock('work')) {
     Map<String, Map> queues = appMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY)
     Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : null
@@ -3699,15 +3732,18 @@ void completePlayerAudioClip(String playerId, Map completed, String phase) {
     }
     queues[playerId] = queue
     saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
-    if(completed.groupCorrelationId) {
-      ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
-        candidate.getDataValue('id')?.toString() == playerId
-      }
-      handleGroupAnnouncementProgress(player, [correlationId: completed.groupCorrelationId, playerId: playerId,
-        phase: phase == 'FAILED' || phase == 'TIMEOUT' ? 'FAILED' : phase])
-    }
-    runInMillis(1, 'dispatchNextPlayerAudioClipCallback', [data: [playerId: playerId], overwrite: false])
+    completedActive = true
   }
+  if(!completedActive) { return }
+  // Group progress takes appLock('work') itself and may reach driver calls, so it runs outside this clip's block.
+  if(completed.groupCorrelationId) {
+    ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+      candidate.getDataValue('id')?.toString() == playerId
+    }
+    handleGroupAnnouncementProgress(player, [correlationId: completed.groupCorrelationId, playerId: playerId,
+      phase: phase == 'FAILED' || phase == 'TIMEOUT' ? 'FAILED' : phase])
+  }
+  runInMillis(1, 'dispatchNextPlayerAudioClipCallback', [data: [playerId: playerId], overwrite: false])
 }
 
 /** Child entry point: accept one audioClip status report from a player driver and apply it from a new execution. */
@@ -4244,6 +4280,9 @@ void releaseGroupAnnouncementTTSAfterChime(Map data = null) {
 }
 
 void finishGroupAnnouncement(String groupDni, String correlationId, String reason) {
+  // The coordinator driver is called only after appLock('work') is released: holding the lock across a
+  // synchronous driver call can block a driver callback that needs the same lock.
+  ChildDeviceWrapper restoreTarget = null
   synchronized(appLock('work')) {
     Map<String, Map> queues = appMemoryMap(GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY)
     Map queue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : null
@@ -4258,12 +4297,22 @@ void finishGroupAnnouncement(String groupDni, String correlationId, String reaso
         queues[groupDni] = queue
         saveAppMemoryMap(GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY, queues)
         logInfo("Restoring coordinator playback for ${correlationId} after ${reason}")
-        coordinator.restoreGroupAnnouncementPlayback(correlationId)
-        return
+        restoreTarget = coordinator
+      } else {
+        logWarn("Cannot restore playback for ${correlationId}: coordinator is unavailable")
       }
-      logWarn("Cannot restore playback for ${correlationId}: coordinator is unavailable")
     }
-    completeGroupAnnouncementPlaybackRestore(groupDni, correlationId, [restored: false, skipped: reason])
+    if(restoreTarget == null) {
+      completeGroupAnnouncementPlaybackRestore(groupDni, correlationId, [restored: false, skipped: reason])
+    }
+  }
+  if(restoreTarget != null) {
+    try {
+      restoreTarget.restoreGroupAnnouncementPlayback(correlationId)
+    } catch(Exception e) {
+      logWarn("Coordinator playback restore for ${correlationId} failed: ${e.message}")
+      completeGroupAnnouncementPlaybackRestore(groupDni, correlationId, [restored: false, skipped: 'restore-call-failed'])
+    }
   }
 }
 
@@ -8347,74 +8396,6 @@ void versionCheckFinish(Map job) {
   else { logInfo('All installed files are up to date') }
 }
 
-String getDriverVersionForUpdate(String driverName, String namespace) {
-  String hubVersion = null
-
-  try {
-    String cookie = login()
-    if(cookie == null) { return null }
-
-    // Get list of installed drivers
-    Map params = [
-      uri: "http://127.0.0.1:8080",
-      path: '/device/drivers',
-      headers: hubCookieHeaders(cookie)
-    ]
-
-    httpGet(params) { resp ->
-      def driver = resp.data?.drivers?.find {
-        it.type == 'usr' && it?.name == driverName && it?.namespace == namespace
-      }
-
-      if(driver?.id) {
-        // Get hub's internal version using /driver/ajax/code
-        Map codeParams = [
-          uri: "http://127.0.0.1:8080",
-          path: '/driver/ajax/code',
-          headers: hubCookieHeaders(cookie),
-          query: [id: driver.id]
-        ]
-
-        httpGet(codeParams) { codeResp ->
-          if(codeResp?.status == 200 && codeResp.data?.version) {
-            hubVersion = codeResp.data.version.toString()
-            logDebug("Got hub version ${hubVersion} for ${driverName}")
-          }
-        }
-      }
-    }
-  } catch(Exception e) {
-    logWarn("Error getting hub version for ${driverName}: ${e.message}")
-  }
-
-  return hubVersion
-}
-
-void fixVersionMismatches() {
-  if(state.maintenanceJob instanceof Map) { logWarn('A maintenance operation is already in progress'); return }
-  List<Map> driverMismatches = ((List<Map>)(state.versionMismatches ?: [])).findAll { Map item -> item.type == 'driver' }
-  if(driverMismatches.isEmpty()) { logInfo('No driver version mismatches to fix'); return }
-  Map job = [id:UUID.randomUUID().toString(), op:'repairVersions', drivers:driverMismatches.collect { Map item ->
-    [name:item.name, namespace:item.namespace ?: 'dwinks', location:item.location]
-  }, errors:[], successCount:0]
-  state.maintenanceJob = job
-  job.pendingRequest = [stage:'nextDriver']
-  maintenanceAuthenticate(job)
-}
-
-void fixDriverMismatches() {
-  if(state.maintenanceJob instanceof Map) { logWarn('A maintenance operation is already in progress'); return }
-  List driverMismatches = state.pendingDriverMismatches ?: []
-  state.remove('pendingDriverMismatches')
-  if(!driverMismatches) { checkInstalledVersions(); return }
-  Map job = [id:UUID.randomUUID().toString(), op:'repairVersions', drivers:driverMismatches.collect { Map item ->
-    [name:item.name, namespace:item.namespace ?: 'dwinks', location:item.location]
-  }, errors:[], successCount:0]
-  state.maintenanceJob = job
-  job.pendingRequest = [stage:'nextDriver']
-  maintenanceAuthenticate(job)
-}
-
 void cleanupDuplicates() {
   if(state.maintenanceJob instanceof Map) { logWarn('A maintenance operation is already in progress'); return }
   logInfo("Checking for duplicate apps and drivers...")
@@ -8425,60 +8406,6 @@ void cleanupDuplicates() {
   state.duplicateCleanupResult = 'Checking for duplicate apps and drivers...'
   job.pendingRequest = [stage:'duplicateApps']
   maintenanceAuthenticate(job)
-}
-
-void uploadBundle(Map bundle) {
-  try {
-    String cookie = login()
-    if(cookie == null) {
-      logError('Failed to authenticate with hub')
-      return
-    }
-
-    logInfo("Uploading bundle: ${bundle.name}")
-
-    // Download the bundle ZIP file
-    byte[] zipData = null
-    Map params = [
-      uri: bundle.location,
-      contentType: 'application/zip',
-      timeout: 300,
-      ignoreSSLIssues: true
-    ]
-
-    httpGet(params) { resp ->
-      zipData = resp.data.bytes
-    }
-
-    if(!zipData) {
-      logWarn("Failed to download bundle ${bundle.name}")
-      return
-    }
-
-    // Upload using HPM's installFile pattern: a byte[] multipart body with CRLF line endings.
-    String boundary = "----WebKitFormBoundaryDtoO2QfPwfhTjOuS"
-    String zipFilename = "${bundle.id}-${bundle.name.replaceAll(/[^a-zA-Z0-9]/, '')}.zip"
-
-    Map uploadParams = [
-      uri: "http://127.0.0.1:8080",
-      path: "/hub/fileManager/upload",
-      query: ['folder': '/'],
-      headers: hubCookieHeaders(cookie) + [
-        'Content-Type': "multipart/form-data; boundary=${boundary}"
-      ],
-      body: buildMultipartFileBody(boundary, 'uploadFile', zipFilename, 'application/zip', zipData, [folder: '']),
-      timeout: 300,
-      ignoreSSLIssues: true
-    ]
-
-    httpPost(uploadParams) { resp ->
-      if(resp?.status == 200) {
-        logInfo("Successfully uploaded bundle ${bundle.name}")
-      }
-    }
-  } catch(Exception e) {
-    logError("Failed to upload bundle ${bundle.name}: ${e.message}")
-  }
 }
 
 @CompileStatic
@@ -8493,26 +8420,6 @@ static byte[] buildMultipartFileBody(String boundary, String fileField, String f
   }
   out.write(("--${boundary}--${crlf}").toString().getBytes('UTF-8'))
   return out.toByteArray()
-}
-
-Map downloadManifest(String url) {
-  try {
-    Map params = [
-      uri: url,
-      contentType: 'application/json',
-      timeout: 15
-    ]
-    Map manifest = null
-    httpGet(params) { resp ->
-      if(resp?.status == 200 && resp.data) {
-        manifest = resp.data
-      }
-    }
-    return manifest
-  } catch(Exception e) {
-    logWarn("Failed to download manifest: ${e.message}")
-    return null
-  }
 }
 
 // =============================================================================
@@ -8558,6 +8465,13 @@ Map buildLocalControlCallbackData(Object existingData, String requestMethod, Str
   return callbackData
 }
 
+void logLocalDispatch(String caller, Object callbackData, Map params) {
+  Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
+      ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
+  String requestSummary = "Dispatching local HTTP ${retryData.method ?: 'POST'} request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attempt ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
+  logPayloadAtTrace(requestSummary, "${caller}: ${params}".toString())
+}
+
 void sendLocalCommandAsync(Map args) {
   Map params = buildLocalRequest(args)
   if(params == null) { return }
@@ -8567,10 +8481,7 @@ void sendLocalCommandAsync(Map args) {
     Boolean retryable = args.retryable == true
     callbackData = buildLocalControlCallbackData(args.data, 'POST', callbackMethod, params, retryable)
   }
-  Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
-      ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
-  String requestSummary = "Dispatching local HTTP ${retryData.method ?: 'POST'} request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attempt ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
-  logPayloadAtTrace(requestSummary, "sendLocalCommandAsync: ${params}")
+  logLocalDispatch('sendLocalCommandAsync', callbackData, params)
   asynchttpPost(callbackMethod, params, callbackData)
 }
 
@@ -8582,10 +8493,7 @@ void sendLocalQueryAsync(Map args) {
   if(callbackMethod == 'localControlCallback') {
     callbackData = buildLocalControlCallbackData(args.data, 'GET', callbackMethod, params, true)
   }
-  Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
-      ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
-  String requestSummary = "Dispatching local HTTP GET request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attempt ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
-  logPayloadAtTrace(requestSummary, "sendLocalQueryAsync: ${params}")
+  logLocalDispatch('sendLocalQueryAsync', callbackData, params)
   asynchttpGet(callbackMethod, params, callbackData)
 }
 
@@ -8600,10 +8508,7 @@ void sendLocalJsonAsync(Map args) {
     Boolean retryable = args.retryable == true
     callbackData = buildLocalControlCallbackData(args.data, 'POST', callbackMethod, params, retryable)
   }
-  Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
-      ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
-  String requestSummary = "Dispatching local HTTP POST request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attempt ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
-  logPayloadAtTrace(requestSummary, "sendLocalJsonAsync: ${params}")
+  logLocalDispatch('sendLocalJsonAsync', callbackData, params)
   asynchttpPost(callbackMethod, params, callbackData)
 }
 
@@ -8673,59 +8578,6 @@ Boolean responseIsValid(AsyncResponse response, String requestName = null) {
 
 String getCurrentVersion() {
   return app.version ?: '0.7.10'
-}
-
-// Get the ACTUAL current version from the hub's app code (not the running instance)
-// This is important after updates, as the running instance may have the old version
-String getActualInstalledAppVersion() {
-  try {
-    String cookie = login()
-    if(cookie == null) {
-      logWarn('Failed to authenticate to get app version')
-      return getCurrentVersion() // Fallback to instance version
-    }
-
-    // Find this app's code ID
-    List allApps = getAppCodeList()
-    Map targetApp = allApps.find { it.name == 'Sonos Advanced Controller' && it.namespace == 'dwinks' }
-
-    if(!targetApp) {
-      logWarn('Could not find app code entry')
-      return getCurrentVersion() // Fallback to instance version
-    }
-
-    // Query the app code to get its version
-    Map params = [
-      uri: "http://127.0.0.1:8080",
-      path: '/app/ajax/code',
-      headers: hubCookieHeaders(cookie),
-      query: [id: targetApp.id],
-      timeout: 15,
-      ignoreSSLIssues: true
-    ]
-
-    String version = null
-    httpGet(params) { resp ->
-      if(resp?.status == 200 && resp.data?.source) {
-        // Parse the version from the source code definition
-        def matcher = resp.data.source =~ /version:\s*['"]([^'"]+)['"]/
-        if(matcher) {
-          version = matcher[0][1]
-        }
-      }
-    }
-
-    if(version) {
-      logDebug("Got actual installed app version from hub: ${version}")
-      return version
-    } else {
-      logWarn('Could not parse version from app code')
-      return getCurrentVersion() // Fallback to instance version
-    }
-  } catch(Exception e) {
-    logError("Error getting actual app version: ${e.message}")
-    return getCurrentVersion() // Fallback to instance version
-  }
 }
 
 void checkForUpdates(Boolean manual = false) {
@@ -9151,397 +9003,7 @@ void maintenanceFinish(Map job) {
   state.remove('maintenanceJob')
 }
 
-String downloadFile(String uri) {
-  try {
-    Map params = [
-      uri: uri,
-      contentType: 'text/plain',
-      timeout: 30
-    ]
-
-    String fileContent = null
-
-    httpGet(params) { resp ->
-      if(resp?.status == 200) {
-        fileContent = resp.data.text
-      }
-    }
-
-    return fileContent
-  } catch(Exception e) {
-    logError("Error downloading file from ${uri}: ${e.message}")
-    return null
-  }
-}
-
-Boolean updateThisApp(String sourceCode, String newVersionForLogging) {
-  try {
-    String cookie = login()
-    if(cookie == null) {
-      logError('Failed to authenticate with hub')
-      return false
-    }
-
-    // Find the app code ID by matching name and namespace
-    // Note: app.id is the INSTANCE id, not the CODE id. We need the code ID from /hub2/userAppTypes
-    List allApps = getAppCodeList()
-    String thisAppName = 'Sonos Advanced Controller'
-    String thisAppNamespace = 'dwinks'
-
-    Map targetApp = allApps.find { appEntry ->
-      appEntry.name == thisAppName && appEntry.namespace == thisAppNamespace
-    }
-
-    if(!targetApp) {
-      logError("Could not find app code for ${thisAppName} in namespace ${thisAppNamespace}")
-      logDebug("Available apps: ${allApps}")
-      return false
-    }
-
-    String appCodeId = targetApp.id
-    logDebug("Found app code ID: ${appCodeId} for ${thisAppName}")
-
-    // Get the app's current internal version from the hub (HPM uses this for updates)
-    Integer currentHubVersion = null
-    Map getAppParams = [
-      uri: "http://127.0.0.1:8080",
-      path: '/app/ajax/code',
-      requestContentType: 'application/x-www-form-urlencoded',
-      headers: hubCookieHeaders(cookie),
-      query: [id: appCodeId],
-      timeout: 300,
-      ignoreSSLIssues: true
-    ]
-
-    try {
-      httpGet(getAppParams) { getResp ->
-        logDebug("App code response status: ${getResp?.status}")
-        logDebug("App code response data: ${getResp.data}")
-        if(getResp?.status == 200 && getResp.data?.version != null) {
-          currentHubVersion = getResp.data.version as Integer
-          logDebug("Got current app version from hub: ${currentHubVersion}")
-        } else {
-          logWarn("Could not get app version from hub - response: ${getResp.data}")
-        }
-      }
-    } catch(Exception e) {
-      logError("Error getting app version: ${e.message}")
-    }
-
-    // If we couldn't get the version, we cannot update
-    if(currentHubVersion == null) {
-      logError("Cannot update app: unable to retrieve current version from hub")
-      return false
-    }
-
-    logDebug("Updating app to version ${newVersionForLogging}, hub internal version: ${currentHubVersion}")
-
-    // HPM uses /app/ajax/update for existing apps with version parameter
-    Map params = [
-      uri: "http://127.0.0.1:8080",
-      path: '/app/ajax/update',
-      requestContentType: 'application/x-www-form-urlencoded',
-      headers: hubCookieHeaders(cookie) + ['Connection': 'keep-alive'],
-      body: [
-        id: appCodeId,
-        version: currentHubVersion,
-        source: sourceCode
-      ],
-      timeout: 300,
-      ignoreSSLIssues: true
-    ]
-
-    Boolean result = false
-    httpPost(params) { resp ->
-      logDebug("App update response: ${resp.data}")
-      // HPM checks for resp.data.status == "success"
-      if(resp.data?.status == 'success') {
-        logInfo("App updated successfully to version ${newVersionForLogging}")
-        result = true
-      } else {
-        logError("App update failed - response: ${resp.data}")
-        result = false
-      }
-    }
-    return result
-  } catch(Exception e) {
-    logError("Error updating app: ${e.message}")
-    return false
-  }
-}
-
-Boolean updateDriver(String driverName, String namespace, String sourceCode, String newVersionForLogging) {
-  try {
-    String cookie = login()
-    if(cookie == null) {
-      logError('Failed to authenticate with hub')
-      return false
-    }
-
-    // Find the driver by name and namespace
-    List allDrivers = getDriverList()
-    Map targetDriver = allDrivers.find { driver ->
-      driver.name == driverName && driver.namespace == namespace
-    }
-
-    if(!targetDriver) {
-      // Driver doesn't exist - create it using /driver/save (HPM pattern)
-      logInfo("Driver not found, creating new driver: ${namespace}.${driverName}")
-
-      Map createParams = [
-        uri: "http://127.0.0.1:8080",
-        path: '/driver/save',
-        requestContentType: 'application/x-www-form-urlencoded',
-        headers: hubCookieHeaders(cookie),
-        body: [
-          id: '',
-          version: '',
-          create: '',
-          source: sourceCode
-        ],
-        timeout: 300,
-        ignoreSSLIssues: true
-      ]
-
-      Boolean result = false
-      httpPost(createParams) { resp ->
-        // HPM checks for Location header on successful create
-        if(resp.headers?.Location != null) {
-          String newId = resp.headers.Location.replaceAll("https?://127.0.0.1:(?:8080|8443)/driver/editor/", "")
-          logInfo("Successfully created driver ${driverName} with id ${newId}")
-          result = true
-        } else {
-          logError("Driver ${driverName} creation failed - no Location header")
-          result = false
-        }
-      }
-      return result
-    }
-
-    // Driver exists - update it using /driver/ajax/update (HPM pattern)
-    logInfo("Updating existing driver ${driverName} (id: ${targetDriver.id})")
-
-    // Get driver's current version
-    String currentHubVersion = getDriverVersionForUpdate(driverName, namespace) ?: ''
-    logDebug("Updating driver ${driverName}: hub version=${currentHubVersion}, new version=${newVersionForLogging}")
-
-    Map updateParams = [
-      uri: "http://127.0.0.1:8080",
-      path: '/driver/ajax/update',
-      requestContentType: 'application/x-www-form-urlencoded',
-      headers: hubCookieHeaders(cookie),
-      body: [
-        id: targetDriver.id,
-        version: currentHubVersion,
-        source: sourceCode
-      ],
-      timeout: 300,
-      ignoreSSLIssues: true
-    ]
-
-    Boolean result = false
-    httpPost(updateParams) { resp ->
-      logDebug("Driver update response: ${resp.data}")
-      // HPM checks for resp.data.status == "success"
-      if(resp.data?.status == 'success') {
-        logInfo("Successfully updated driver ${driverName}")
-        result = true
-      } else {
-        logError("Driver ${driverName} update failed - response: ${resp.data}")
-        result = false
-      }
-    }
-    return result
-  } catch(Exception e) {
-    logError("Error updating/creating driver ${driverName}: ${e.message}")
-    return false
-  }
-}
-
-List getDriverList() {
-  try {
-    String cookie = login()
-    if(cookie == null) { return [] }
-
-    Map params = [
-      uri: "http://127.0.0.1:8080",
-      path: '/device/drivers',
-      headers: hubCookieHeaders(cookie),
-      timeout: 15
-    ]
-
-    List drivers = []
-
-    httpGet(params) { resp ->
-      if(resp?.status == 200 && resp.data?.drivers) {
-        // Filter to only user drivers
-        drivers = resp.data.drivers.findAll { it.type == 'usr' }
-      }
-    }
-
-    return drivers
-  } catch(Exception e) {
-    logError("Error getting driver list: ${e.message}")
-    return []
-  }
-}
-
-// Get list of app code entries (not installed app instances)
-List getAppCodeList() {
-  try {
-    String cookie = login()
-    if(cookie == null) { return [] }
-
-    // Use /hub2/userAppTypes endpoint like HPM does (requires 2.3.6+)
-    Map params = [
-      uri: "http://127.0.0.1:8080",
-      path: '/hub2/userAppTypes',
-      headers: hubCookieHeaders(cookie),
-      timeout: 15,
-      ignoreSSLIssues: true
-    ]
-
-    List apps = []
-
-    httpGet(params) { resp ->
-      if(resp?.status == 200 && resp.data) {
-        resp.data.each { appEntry ->
-          apps << [id: appEntry.id.toString(), name: appEntry.name, namespace: appEntry.namespace]
-        }
-      }
-    }
-
-    return apps
-  } catch(Exception e) {
-    logError("Error getting app code list: ${e.message}")
-    return []
-  }
-}
-
-// Find and remove duplicate app or driver entries (keeps the one with lowest ID, removes others)
-Map findAndRemoveDuplicates() {
-  Map results = [appsRemoved: 0, driversRemoved: 0, errors: []]
-
-  try {
-    String cookie = login()
-    if(cookie == null) {
-      results.errors << "Failed to authenticate"
-      return results
-    }
-
-    // Check for duplicate apps
-    List allApps = getAppCodeList()
-    Map appsByNamespace = [:].withDefault { [] }
-    allApps.each { appEntry ->
-      String key = "${appEntry.namespace}:${appEntry.name}"
-      appsByNamespace[key] << appEntry
-    }
-
-    appsByNamespace.each { key, entries ->
-      if(entries.size() > 1) {
-        logWarn("Found ${entries.size()} duplicate apps for ${key}")
-        // Sort by ID (keep lowest, which is usually the original)
-        entries.sort { Integer.parseInt(it.id) }
-        // Remove all but the first (lowest ID)
-        entries.drop(1).each { duplicate ->
-          logInfo("Removing duplicate app: ${duplicate.name} (id: ${duplicate.id})")
-          if(uninstallAppCode(duplicate.id, cookie)) {
-            results.appsRemoved++
-          } else {
-            results.errors << "Failed to remove app ${duplicate.name} (id: ${duplicate.id})"
-          }
-        }
-      }
-    }
-
-    // Check for duplicate drivers
-    List allDrivers = getDriverList()
-    Map driversByNamespace = [:].withDefault { [] }
-    allDrivers.each { driverEntry ->
-      String key = "${driverEntry.namespace}:${driverEntry.name}"
-      driversByNamespace[key] << driverEntry
-    }
-
-    driversByNamespace.each { key, entries ->
-      if(entries.size() > 1) {
-        logWarn("Found ${entries.size()} duplicate drivers for ${key}")
-        // Sort by ID (keep lowest, which is usually the original)
-        entries.sort { it.id as Integer }
-        // Remove all but the first (lowest ID)
-        entries.drop(1).each { duplicate ->
-          logInfo("Removing duplicate driver: ${duplicate.name} (id: ${duplicate.id})")
-          if(uninstallDriverCode(duplicate.id.toString(), cookie)) {
-            results.driversRemoved++
-          } else {
-            results.errors << "Failed to remove driver ${duplicate.name} (id: ${duplicate.id})"
-          }
-        }
-      }
-    }
-
-  } catch(Exception e) {
-    logError("Error finding/removing duplicates: ${e.message}")
-    results.errors << e.message
-  }
-
-  if(results.appsRemoved > 0 || results.driversRemoved > 0) {
-    logInfo("Removed ${results.appsRemoved} duplicate apps and ${results.driversRemoved} duplicate drivers")
-  }
-
-  return results
-}
-
-// Uninstall app code (not app instance) - uses HPM-style endpoint
-Boolean uninstallAppCode(String appCodeId, String cookie) {
-  try {
-    // Use newer endpoint if available (2.3.8+), fallback to older method
-    Map params = [
-      uri: "http://127.0.0.1:8080",
-      path: "/app/edit/deleteJsonSafe/${appCodeId}",
-      headers: hubCookieHeaders(cookie),
-      timeout: 300,
-      ignoreSSLIssues: true
-    ]
-
-    Boolean result = false
-    httpGet(params) { resp ->
-      if(resp.data?.status == true) {
-        result = true
-      }
-    }
-    return result
-  } catch(Exception e) {
-    logError("Error uninstalling app code ${appCodeId}: ${e.message}")
-    return false
-  }
-}
-
-// Uninstall driver code - uses HPM-style endpoint
-Boolean uninstallDriverCode(String driverCodeId, String cookie) {
-  try {
-    // Use newer endpoint if available (2.3.7+)
-    Map params = [
-      uri: "http://127.0.0.1:8080",
-      path: "/driver/editor/deleteJson/${driverCodeId}",
-      headers: hubCookieHeaders(cookie),
-      timeout: 300,
-      ignoreSSLIssues: true
-    ]
-
-    Boolean result = false
-    httpGet(params) { resp ->
-      if(resp.data?.status == true) {
-        result = true
-      }
-    }
-    return result
-  } catch(Exception e) {
-    logError("Error uninstalling driver code ${driverCodeId}: ${e.message}")
-    return false
-  }
-}
-
-/** The one definition of the hub-admin /login POST; synchronous and asynchronous callers both use it. */
+/** The one definition of the hub-admin /login POST used by the asynchronous update and maintenance flows. */
 Map hubLoginParams() {
   return [
     uri: 'http://127.0.0.1:8080',
@@ -9592,65 +9054,6 @@ void clearHubCookie() {
 
 Map hubSessionHeaders() {
   return hubCookieHeaders(cachedHubCookie())
-}
-
-String login() {
-  // Reuse a recent cookie; sessions expire, so cachedHubCookie() discards a stale one.
-  String existing = cachedHubCookie()
-  if(existing != null) {
-    logDebug('Reusing existing cookie')
-    return existing
-  }
-
-  try {
-    String cookie = null
-    httpPost(hubLoginParams()) { resp ->
-      logDebug("Login response status: ${resp?.status}")
-      if(resp?.status == 200 || resp?.status == 302) {
-        cookie = extractHubCookie(resp?.headers)
-        if(cookie) {
-          storeHubCookie(cookie)
-          logDebug('Hub login succeeded')
-        } else if(hasUnauthenticatedHubAccess()) {
-          cookie = ''
-          storeHubCookie(cookie)
-          logDebug('Hub API access does not require a login cookie')
-        } else {
-          logWarn('No Set-Cookie header in login response')
-        }
-      } else {
-        logWarn("Unexpected login status: ${resp?.status}")
-      }
-    }
-
-    if(cookie == null) {
-      logWarn('Failed to get authentication cookie')
-    }
-    return cookie
-  } catch(Exception e) {
-    logError("Login error: ${e.message}")
-    return null
-  }
-}
-
-Boolean hasUnauthenticatedHubAccess() {
-  try {
-    Map params = [
-      uri: "http://127.0.0.1:8080",
-      path: '/hub2/userAppTypes',
-      timeout: 15,
-      ignoreSSLIssues: true
-    ]
-
-    Boolean accessible = false
-    httpGet(params) { resp ->
-      accessible = resp?.status == 200 && resp.data instanceof Collection
-    }
-    return accessible
-  } catch(Exception e) {
-    logDebug("Unable to check unauthenticated hub access: ${e.message}")
-    return false
-  }
 }
 
 Object getResponseHeaderIgnoreCase(Object headers, String headerName) {
