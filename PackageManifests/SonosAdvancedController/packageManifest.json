@@ -15,7 +15,7 @@
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Apps/SonosAdvancedDiscoveryApp.groovy",
       "name": "Sonos Advanced Controller - Discovery & Management",
       "namespace": "dwinks",
-      "required": false
+      "required": true
     },
     {
       "id": "45ee968f-ce6c-459f-91c1-108d7d572a3b",
