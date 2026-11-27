@@ -718,7 +718,7 @@ Map getSoapActionParams(String deviceIp, Map service, String action, Map control
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.19.0',
+    version: '0.19.1',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: false,

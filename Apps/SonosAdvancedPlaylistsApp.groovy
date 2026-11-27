@@ -29,7 +29,7 @@ import org.apache.commons.lang3.StringUtils
 
 definition(
   name: 'Sonos Advanced Controller - Playlists',
-  version: '0.19.0',
+  version: '0.19.1',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   parent: 'dwinks:Sonos Advanced Controller',
