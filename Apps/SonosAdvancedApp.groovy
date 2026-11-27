@@ -238,6 +238,7 @@ String convertHexToIP(String hex) {
 
 @Field static final List<Integer> DEFAULT_HTTP_RETRY_DELAYS_SECONDS = [60, 180, 300]
 @Field static final Integer DEFAULT_MAX_HTTP_RETRY_ATTEMPTS = 3
+@Field static final String LOCAL_CONTROL_API_KEY = '123e4567-e89b-12d3-a456-426655440000'
 
 Integer getHttpStatusCode(AsyncResponse response) {
   if (response == null) return null
@@ -266,52 +267,35 @@ Integer getHttpStatusCode(AsyncResponse response) {
   }
 }
 
-void resetHttpRetryCounter(String stateKey = 'httpRetryAttemptCount') {
-  state[stateKey] = 0
-  logDebug "HTTP retry counter reset (${stateKey})"
-}
-
 Boolean handleAsyncHttpFailureWithRetry(
   AsyncResponse response,
-  String retryMethodName,
-  String stateKey = 'httpRetryAttemptCount',
+  Map retryData,
   List<Integer> retryDelays = DEFAULT_HTTP_RETRY_DELAYS_SECONDS,
   Integer maxRetries = DEFAULT_MAX_HTTP_RETRY_ATTEMPTS,
   String customErrorMessage = null
 ) {
-  // Get the current retry attempt count
-  Integer currentRetryCount = state[stateKey] ?: 0
-
-  // Log the specific error with attempt information
+  Integer currentAttempt = (retryData?.attempt ?: 1) as Integer
+  Integer retryIndex = currentAttempt - 1
   Integer statusCode = getHttpStatusCode(response)
-  String errorDetails = customErrorMessage ?: (response?.hasError() ?
+  String errorDetails = customErrorMessage ?: (response?.hasError() == true ?
     "HTTP request error: ${response.getErrorMessage()}" :
     (statusCode != null ? "HTTP request returned status ${statusCode} (expected 200 OK)" :
-      "HTTP request returned no status code"))
-  logError "${errorDetails} (attempt ${currentRetryCount + 1} of ${maxRetries + 1})"
+      (response == null ? 'HTTP request returned no response' : 'HTTP request returned no status code')))
+  logError("${errorDetails} (attempt ${currentAttempt} of ${maxRetries + 1})")
 
-  // Check if we have retries remaining
-  if (currentRetryCount < maxRetries) {
-    // Get the delay for this retry attempt (0-indexed)
-    Integer retryDelaySeconds = retryDelays[currentRetryCount]
-
-    // Increment the retry counter for the next attempt
-    state[stateKey] = currentRetryCount + 1
-
-    // Calculate human-readable delay for logging
+  if (retryData?.retryable == true && retryIndex < maxRetries && retryIndex < retryDelays.size()) {
+    Integer retryDelaySeconds = retryDelays[retryIndex]
+    Map nextRetryData = new LinkedHashMap(retryData)
+    if(retryData.params instanceof Map) { nextRetryData.params = new LinkedHashMap(retryData.params as Map) }
+    nextRetryData.attempt = currentAttempt + 1
+    nextRetryData.attemptId = UUID.randomUUID().toString()
     String delayDescription = retryDelaySeconds >= 60 ?
-        "${retryDelaySeconds / 60} minute(s)" :
-        "${retryDelaySeconds} second(s)"
-
-    logWarn "Scheduling retry attempt ${currentRetryCount + 1} of ${maxRetries} in ${delayDescription}"
-
-    // Schedule the retry attempt
-    runIn(retryDelaySeconds, retryMethodName)
+        "${retryDelaySeconds / 60} minute(s)" : "${retryDelaySeconds} second(s)"
+    logWarn("Scheduling retry attempt ${currentAttempt + 1} of ${maxRetries + 1} in ${delayDescription}")
+    runIn(retryDelaySeconds, 'executeLocalControlRetry', [data: nextRetryData, overwrite: false])
     return true
   } else {
-    // All retries exhausted
-    logError "All ${maxRetries} retry attempts failed. Will retry at next scheduled refresh."
-    state[stateKey] = 0  // Reset for next scheduled refresh
+    logError('Local HTTP retry limit reached; no further retries will be scheduled.')
     return false
   }
 }
@@ -358,8 +342,6 @@ preferences {
   'hubSecurityUsername', 'hubSecurityPassword'
 ]
 
-@Field static final String LOCAL_CONTROL_RETRY_STATE_KEY = 'localControlRetryAttemptCount'
-@Field static final String LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY = 'lastLocalControlRetryRequest'
 @Field static final String LOCAL_CONTROL_RETRY_DATA_KEY = '_localControlRetryRequest'
 // Hub login sessions expire; re-login when the cached cookie is older than this.
 @Field static final Long HUB_COOKIE_MAX_AGE_MS = Duration.ofMinutes(10).toMillis()
@@ -484,8 +466,6 @@ preferences {
   PLAYER_PROVISIONING_REQUEST_STATUS_KEY,
   PENDING_GROUP_CONFIGURATION_REQUESTS_KEY,
   DISCOVERY_MANAGEMENT_CHILD_ID_STATE_KEY,
-  LOCAL_CONTROL_RETRY_STATE_KEY,
-  LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY,
   ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY,
   'userGroups',
   'alarmManagementPreferencesApplied',
@@ -773,7 +753,7 @@ String getLocalApiPrefix(String ipAddress) {
 
 Boolean requestSonosPlayerInfo(String ipAddress, String callback, Map callbackData) {
   Map params = [uri: "${getLocalApiPrefix("${ipAddress}:1443")}/players/local/info",
-    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
+    headers: ['X-Sonos-Api-Key': LOCAL_CONTROL_API_KEY],
     requestContentType: 'application/json', contentType: 'application/json', ignoreSSLIssues: true, timeout: 3]
   try {
     asynchttpGet(callback, params, callbackData ?: [ipAddress: ipAddress])
@@ -3520,7 +3500,7 @@ Map prepareNextPlayerAudioClipPost(String playerId, Map<String, ChildDeviceWrapp
   if(next.uri) { body.streamUrl = next.uri }
   if(next.clipType) { body.clipType = next.clipType }
   Map params = [uri: "${getLocalApiPrefix("${ip}:1443")}${AUDIO_CLIP_ENDPOINT}",
-    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
+    headers: ['X-Sonos-Api-Key': LOCAL_CONTROL_API_KEY],
     requestContentType: 'application/json', contentType: 'application/json',
     ignoreSSLIssues: true, timeout: 5, body: JsonOutput.toJson(body)]
   next.appId = AUDIO_CLIP_APP_ID
@@ -8366,191 +8346,124 @@ Map downloadManifest(String url) {
 // =============================================================================
 // HTTP Helpers
 // =============================================================================
-Map buildLocalControlCallbackData(Object existingData, String requestMethod, String callbackMethod, Map params, Boolean retryable, Boolean isRetryAttempt = false, String requestId = null) {
+Map buildLocalRequest(Map args) {
+  Map sourceParams = args?.params instanceof Map ? args.params as Map : [:]
+  if(args?.endpoint == null && sourceParams.uri == null) { return null }
+
+  Map params = new LinkedHashMap(sourceParams)
+  params.uri = params.uri ?: "${getLocalApiPrefix(args.ipAddress)}${args.endpoint}"
+  params.contentType = params.contentType ?: 'application/json'
+  params.requestContentType = params.requestContentType ?: 'application/json'
+  if(params.ignoreSSLIssues == null) { params.ignoreSSLIssues = true }
+
+  Map headers = params.headers instanceof Map ? new LinkedHashMap(params.headers as Map) : [:]
+  if(headers['X-Sonos-Api-Key'] == null) { headers['X-Sonos-Api-Key'] = LOCAL_CONTROL_API_KEY }
+  params.headers = headers
+  if(args.encodeJsonBody == true) { params.body = JsonOutput.toJson(args.data) }
+  return params
+}
+
+Map buildLocalControlCallbackData(Object existingData, String requestMethod, String callbackMethod, Map params, Boolean retryable) {
   Map callbackData = existingData instanceof Map ? new LinkedHashMap(existingData as Map) : [:]
   if(existingData != null && existingData instanceof Map == false) {
     callbackData.originalData = existingData
   }
   callbackData[LOCAL_CONTROL_RETRY_DATA_KEY] = [
-    requestId: requestId ?: UUID.randomUUID().toString(),
+    requestId: UUID.randomUUID().toString(),
     attemptId: UUID.randomUUID().toString(),
-    attemptNumber: isRetryAttempt ? (((state[LOCAL_CONTROL_RETRY_STATE_KEY] ?: 0) as Integer) + 1) : 1,
+    attempt: 1,
     method: requestMethod,
     callbackMethod: callbackMethod,
     params: new LinkedHashMap(params),
-    retryable: retryable,
-    retryAttempt: isRetryAttempt
+    retryable: retryable
   ]
   return callbackData
 }
 
 void sendLocalCommandAsync(Map args) {
-  if(args?.endpoint == null && args?.params?.uri == null) { return }
+  Map params = buildLocalRequest(args)
+  if(params == null) { return }
   String callbackMethod = args.callbackMethod ?: 'localControlCallback'
-  Map params = args.params ?: [:]
-  params.uri = args?.params?.uri ?: "${getLocalApiPrefix(args.ipAddress)}${args.endpoint}"
-  params.contentType = args?.params?.contentType ?: 'application/json'
-  params.requestContentType = args?.params?.requestContentType ?: 'application/json'
-  params.ignoreSSLIssues = args?.params?.ignoreSSLIssues ?: true
-  if(params.headers == null) {
-    params.headers = ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000']
-  } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
-    params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
-  }
   Object callbackData = args.data
   if(callbackMethod == 'localControlCallback') {
     Boolean retryable = args.retryable == true
-    if(retryable && state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] == null) {
-      resetHttpRetryCounter(LOCAL_CONTROL_RETRY_STATE_KEY)
-    }
     callbackData = buildLocalControlCallbackData(args.data, 'POST', callbackMethod, params, retryable)
   }
   Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
       ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
-  String requestSummary = "Dispatching local HTTP ${retryData.method ?: 'POST'} request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
+  String requestSummary = "Dispatching local HTTP ${retryData.method ?: 'POST'} request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attempt ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
   logPayloadAtTrace(requestSummary, "sendLocalCommandAsync: ${params}")
   asynchttpPost(callbackMethod, params, callbackData)
 }
 
-Map sendLocalJsonQuerySync(Map args) {
-  if(args?.endpoint == null && args?.params?.uri == null) { return }
-  Map params = args.params ?: [:]
-  params.uri = args.params.uri ?: "${getLocalApiPrefix(args.ipAddress)}${args.endpoint}"
-  params.contentType = args.params.contentType ?: 'application/json'
-  params.requestContentType = args.params.requestContentType ?: 'application/json'
-  params.ignoreSSLIssues = args.params.ignoreSSLIssues ?: true
-  if(params.headers == null) {
-    params.headers = ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000']
-  } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
-    params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
-  }
-  logPayloadAtTrace("Sending local HTTP GET request uri=${params.uri}; payload omitted", "sendLocalQuerySync: ${params}")
-  httpGet(params) { resp ->
-    if (resp && resp.data && resp.success) { return resp.data }
-    else { logError("sendLocalJsonQuerySync: unexpected response: ${resp?.data}") }
-  }
-}
-
 void sendLocalQueryAsync(Map args) {
-  if(args?.endpoint == null && args?.params?.uri == null) { return }
+  Map params = buildLocalRequest(args)
+  if(params == null) { return }
   String callbackMethod = args.callbackMethod ?: 'localControlCallback'
-  Map params = args.params ?: [:]
-  params.uri = args?.params?.uri ?: "${getLocalApiPrefix(args.ipAddress)}${args.endpoint}"
-  params.contentType = args?.params?.contentType ?: 'application/json'
-  params.requestContentType = args?.params?.requestContentType ?: 'application/json'
-  params.ignoreSSLIssues = args?.params?.ignoreSSLIssues ?: true
-  if(params.headers == null) {
-    params.headers = ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000']
-  } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
-    params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
-  }
   Object callbackData = args.data
   if(callbackMethod == 'localControlCallback') {
-    if(state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] == null) {
-      resetHttpRetryCounter(LOCAL_CONTROL_RETRY_STATE_KEY)
-    }
     callbackData = buildLocalControlCallbackData(args.data, 'GET', callbackMethod, params, true)
   }
   Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
       ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
-  String requestSummary = "Dispatching local HTTP GET request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
+  String requestSummary = "Dispatching local HTTP GET request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attempt ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
   logPayloadAtTrace(requestSummary, "sendLocalQueryAsync: ${params}")
   asynchttpGet(callbackMethod, params, callbackData)
 }
 
 void sendLocalJsonAsync(Map args) {
-  if(args?.endpoint == null && args?.params?.uri == null) { return }
+  Map requestArgs = new LinkedHashMap(args ?: [:])
+  requestArgs.encodeJsonBody = true
+  Map params = buildLocalRequest(requestArgs)
+  if(params == null) { return }
   String callbackMethod = args.callbackMethod ?: 'localControlCallback'
-  Map params = args.params ?: [:]
-  params.uri = args?.params?.uri ?: "${getLocalApiPrefix(args.ipAddress)}${args.endpoint}"
-  params.contentType = args?.params?.contentType ?: 'application/json'
-  params.requestContentType = args?.params?.requestContentType ?: 'application/json'
-  params.ignoreSSLIssues = args?.params?.ignoreSSLIssues ?: true
-  params.body = JsonOutput.toJson(args.data)
-  if(params.headers == null) {
-    params.headers = ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000']
-  } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
-    params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
-  }
   Object callbackData = args.data
   if(callbackMethod == 'localControlCallback') {
     Boolean retryable = args.retryable == true
-    if(retryable && state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] == null) {
-      resetHttpRetryCounter(LOCAL_CONTROL_RETRY_STATE_KEY)
-    }
     callbackData = buildLocalControlCallbackData(args.data, 'POST', callbackMethod, params, retryable)
   }
   Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
       ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
-  String requestSummary = "Dispatching local HTTP POST request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
+  String requestSummary = "Dispatching local HTTP POST request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attempt ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
   logPayloadAtTrace(requestSummary, "sendLocalJsonAsync: ${params}")
   asynchttpPost(callbackMethod, params, callbackData)
 }
 
 void localControlCallback(AsyncResponse response, Map data) {
   Map retryRequest = data?.get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map ? data[LOCAL_CONTROL_RETRY_DATA_KEY] as Map : null
-  Map scheduledRetryRequest = state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] instanceof Map ? state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] as Map : null
   String requestId = retryRequest?.requestId as String
   String attemptId = retryRequest?.attemptId as String
-  Boolean requestMatchesScheduledRetry = requestId != null && scheduledRetryRequest?.requestId == requestId
-  Boolean attemptMatchesScheduledRetry = requestMatchesScheduledRetry &&
-      (!scheduledRetryRequest?.activeAttemptId || scheduledRetryRequest.activeAttemptId == attemptId)
-  Integer statusCode = response?.status as Integer
-  logDebug("Local HTTP callback request=${requestId ?: 'untracked'} attempt=${retryRequest?.attemptNumber ?: 1} attemptId=${attemptId ?: 'untracked'} status=${statusCode ?: 'none'} error=${response?.hasError() == true} receivedAt=${now()}")
-  if(retryRequest?.retryable == true && scheduledRetryRequest != null && !attemptMatchesScheduledRetry) {
-    logWarn("Ignoring stale local HTTP callback request=${requestId ?: 'unknown'} attemptId=${attemptId ?: 'unknown'}; activeRequest=${scheduledRetryRequest.requestId} activeAttempt=${scheduledRetryRequest.activeAttemptId ?: 'unknown'}")
-    return
-  }
-  if(retryRequest?.retryAttempt == true && scheduledRetryRequest == null) {
-    logWarn("Ignoring late local HTTP retry callback request=${requestId ?: 'unknown'} attemptId=${attemptId ?: 'unknown'}; no retry is active")
-    return
-  }
-  if (response?.status != 200 || response.hasError()) {
-    logError("Request returned HTTP status ${response.status}")
-    logError("Request error message: ${response.getErrorMessage()}")
-    try{logError("Request ErrorData: ${response.getErrorData()}")} catch(Exception e){}
-    try{logErrorJson("Request ErrorJson: ${response.getErrorJson()}")} catch(Exception e){}
-    try{logErrorXml("Request ErrorXml: ${response.getErrorXml()}")} catch(Exception e){}
-    Boolean retryScheduled = false
+  Integer attempt = retryRequest?.attempt as Integer ?: 1
+  Integer statusCode = getHttpStatusCode(response)
+  Boolean responseHasError = response?.hasError() == true
+  logDebug("Local HTTP callback request=${requestId ?: 'untracked'} attempt=${attempt} attemptId=${attemptId ?: 'untracked'} status=${statusCode ?: 'none'} error=${responseHasError} receivedAt=${now()}")
+  if(response == null || statusCode != 200 || responseHasError) {
+    logError("Request returned HTTP status ${statusCode ?: 'none'}")
+    if(response != null) {
+      logError("Request error message: ${response.getErrorMessage()}")
+      try{logError("Request ErrorData: ${response.getErrorData()}")} catch(Exception e){}
+      try{logErrorJson("Request ErrorJson: ${response.getErrorJson()}")} catch(Exception e){}
+      try{logErrorXml("Request ErrorXml: ${response.getErrorXml()}")} catch(Exception e){}
+    }
     if(retryRequest?.retryable == true) {
-      if(scheduledRetryRequest == null || attemptMatchesScheduledRetry) {
-        retryRequest.activeAttemptId = attemptId
-        state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] = retryRequest
-        retryScheduled = handleAsyncHttpFailureWithRetry(response, 'executeLocalControlRetry', LOCAL_CONTROL_RETRY_STATE_KEY)
-      } else {
-        logWarn("Skipping local control auto-retry for ${retryRequest.method} ${retryRequest?.params?.uri} because another retry is already pending")
-      }
-    }
-    if(retryScheduled == false && (scheduledRetryRequest == null || attemptMatchesScheduledRetry)) {
-      state.remove(LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY)
-      resetHttpRetryCounter(LOCAL_CONTROL_RETRY_STATE_KEY)
+      handleAsyncHttpFailureWithRetry(response, retryRequest)
     }
     return
   }
-  if(response?.status == 200 && response && response.hasError() == false) {
-    if(retryRequest?.retryable == true && (scheduledRetryRequest == null || attemptMatchesScheduledRetry)) {
-      state.remove(LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY)
-      resetHttpRetryCounter(LOCAL_CONTROL_RETRY_STATE_KEY)
-    }
-    logPayloadAtTrace('Successful local HTTP response received; body omitted', "localControlCallback: ${response.getData()}")
-  }
+  logPayloadAtTrace('Successful local HTTP response received; body omitted', "localControlCallback: ${response.getData()}")
 }
 
-void executeLocalControlRetry() {
-  Map retryRequest = state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] instanceof Map ? state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] as Map : null
+void executeLocalControlRetry(Map retryRequest) {
   if(retryRequest?.params instanceof Map == false || retryRequest?.callbackMethod == null || retryRequest?.method == null) {
     logWarn('Unable to execute local control retry because the prior request details were unavailable')
-    state.remove(LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY)
-    resetHttpRetryCounter(LOCAL_CONTROL_RETRY_STATE_KEY)
     return
   }
 
   Map params = new LinkedHashMap(retryRequest.params as Map)
-  Map callbackData = buildLocalControlCallbackData(null, retryRequest.method as String, retryRequest.callbackMethod as String, params, retryRequest.retryable == true, true, retryRequest.requestId as String)
-  Map retryAttemptData = callbackData.get(LOCAL_CONTROL_RETRY_DATA_KEY) as Map
-  retryRequest.activeAttemptId = retryAttemptData.attemptId
-  state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] = retryRequest
-  logInfo("Retrying local control ${retryRequest.method} request=${retryRequest.requestId} attempt=${retryAttemptData.attemptNumber} attemptId=${retryAttemptData.attemptId} uri=${params.uri}")
+  Map callbackRetryData = new LinkedHashMap(retryRequest)
+  callbackRetryData.params = params
+  Map callbackData = [(LOCAL_CONTROL_RETRY_DATA_KEY): callbackRetryData]
+  logInfo("Retrying local control ${retryRequest.method} request=${retryRequest.requestId} attempt=${retryRequest.attempt} attemptId=${retryRequest.attemptId} uri=${params.uri}")
 
   if(retryRequest.method == 'GET') {
     asynchttpGet(retryRequest.callbackMethod as String, params, callbackData)
@@ -8558,11 +8471,8 @@ void executeLocalControlRetry() {
     asynchttpPost(retryRequest.callbackMethod as String, params, callbackData)
   } else {
     logWarn("Unsupported local control retry method: ${retryRequest.method}")
-    state.remove(LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY)
-    resetHttpRetryCounter(LOCAL_CONTROL_RETRY_STATE_KEY)
   }
 }
-
 
 Boolean responseIsValid(AsyncResponse response, String requestName = null) {
   if(response == null) {

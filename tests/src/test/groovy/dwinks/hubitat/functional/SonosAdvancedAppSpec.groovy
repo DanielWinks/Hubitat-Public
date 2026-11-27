@@ -1076,38 +1076,108 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.state.containsKey('ttsVoiceRefreshRequestId')
   }
 
-  def "local HTTP retries retain a request GUID and reject callbacks from an older attempt"() {
+  def "local HTTP retries are isolated per request and retain their request parameters"() {
     when:
-    appScript.sendLocalQueryAsync([params: [uri: 'http://sonos.local/test']])
+    appScript.sendLocalQueryAsync([params: [uri: 'http://sonos.local/first'], data: [player: 'first']])
     Map firstCall = appScript.asyncCalls.last()
     Map firstData = (Map)firstCall.data
     Map firstRetryData = (Map)firstData._localControlRetryRequest
+    appScript.sendLocalQueryAsync([params: [uri: 'http://sonos.local/second'], data: [player: 'second']])
+    Map secondCall = appScript.asyncCalls.last()
+    Map secondData = (Map)secondCall.data
+    Map secondRetryData = (Map)secondData._localControlRetryRequest
+
     appScript.localControlCallback(new AsyncResponse(status: 503, error: true, errorMessage: 'unavailable'), firstData)
-    appScript.executeLocalControlRetry()
-    Map retryCall = appScript.asyncCalls.last()
-    Map retryData = (Map)retryCall.data
-    Map retryMetadata = (Map)retryData._localControlRetryRequest
+    appScript.localControlCallback(null, secondData)
+    List<List> retryJobs = appScript.scheduled.findAll { List job -> job[1] == 'executeLocalControlRetry' }
 
     then:
     UUID.fromString(firstRetryData.requestId).toString() == firstRetryData.requestId
     UUID.fromString(firstRetryData.attemptId).toString() == firstRetryData.attemptId
-    retryMetadata.requestId == firstRetryData.requestId
-    retryMetadata.attemptId != firstRetryData.attemptId
-    retryMetadata.attemptNumber == 2
+    UUID.fromString(secondRetryData.requestId).toString() == secondRetryData.requestId
+    retryJobs.size() == 2
+    retryJobs.every { List job -> job[2].overwrite == false }
+    retryJobs.collect { List job -> job[2].data.requestId } as Set == [firstRetryData.requestId, secondRetryData.requestId] as Set
+    retryJobs.collect { List job -> job[2].data.params.uri } as Set == ['http://sonos.local/first', 'http://sonos.local/second'] as Set
+    retryJobs.every { List job -> job[2].data.attempt == 2 }
+    !appScript.state.containsKey('lastLocalControlRetryRequest')
+    !appScript.state.containsKey('localControlRetryAttemptCount')
 
     when:
+    appScript.executeLocalControlRetry(retryJobs[0][2].data as Map)
+    appScript.executeLocalControlRetry(retryJobs[1][2].data as Map)
+    List<Map> retryCalls = appScript.asyncCalls.findAll { Map call ->
+      ((Map)call.data)._localControlRetryRequest?.attempt == 2
+    }
+    Map firstRetryCall = retryCalls.find { Map call -> call.params.uri == 'http://sonos.local/first' }
+    Map secondRetryCall = retryCalls.find { Map call -> call.params.uri == 'http://sonos.local/second' }
+    Map firstRetryCallbackData = (Map)firstRetryCall.data
+    Map firstRetryMetadata = (Map)firstRetryCallbackData._localControlRetryRequest
     appScript.localControlCallback(new AsyncResponse(status: 200), firstData)
 
     then:
-    appScript.state.lastLocalControlRetryRequest.activeAttemptId == retryMetadata.attemptId
-    appScript.state.localControlRetryAttemptCount == 1
+    firstRetryMetadata.requestId == firstRetryData.requestId
+    firstRetryMetadata.attemptId != firstRetryData.attemptId
+    firstRetryMetadata.params.uri == 'http://sonos.local/first'
+    ((Map)secondRetryCall.data)._localControlRetryRequest.requestId == secondRetryData.requestId
+    appScript.scheduled.findAll { List job -> job[1] == 'executeLocalControlRetry' }.size() == 2
 
     when:
-    appScript.localControlCallback(new AsyncResponse(status: 200), retryData)
+    appScript.localControlCallback(new AsyncResponse(status: 200), firstRetryCallbackData)
 
     then:
     !appScript.state.containsKey('lastLocalControlRetryRequest')
-    appScript.state.localControlRetryAttemptCount == 0
+    !appScript.state.containsKey('localControlRetryAttemptCount')
+  }
+
+  def "local HTTP retries back off 60, 180 and 300 seconds and stop after the third retry"() {
+    given:
+    appScript.sendLocalQueryAsync([params: [uri: 'http://sonos.local/backoff'], data: [player: 'backoff']])
+    Map callbackData = (Map)appScript.asyncCalls.last().data
+    String requestId = ((Map)callbackData._localControlRetryRequest).requestId
+    List<Number> delays = []
+
+    when: 'the original request and each retry fail'
+    (1..3).each { Integer attempt ->
+      appScript.localControlCallback(new AsyncResponse(status: 503, error: true, errorMessage: 'unavailable'), callbackData)
+      List<List> jobs = appScript.scheduled.findAll { List job -> job[1] == 'executeLocalControlRetry' }
+      List lastJob = jobs.last()
+      delays << lastJob[0]
+      assert jobs.size() == attempt
+      assert lastJob[2].data.requestId == requestId
+      assert lastJob[2].data.attempt == attempt + 1
+      appScript.executeLocalControlRetry(lastJob[2].data as Map)
+      callbackData = (Map)appScript.asyncCalls.last().data
+    }
+
+    then:
+    delays == [60, 180, 300]
+    ((Map)callbackData._localControlRetryRequest).attempt == 4
+
+    when: 'the fourth attempt fails'
+    appScript.localControlCallback(new AsyncResponse(status: 503, error: true, errorMessage: 'unavailable'), callbackData)
+
+    then:
+    appScript.scheduled.findAll { List job -> job[1] == 'executeLocalControlRetry' }.size() == 3
+  }
+
+  def "local request builder copies parameters and preserves explicit SSL settings"() {
+    given:
+    Map params = [uri: 'https://sonos.local/test', ignoreSSLIssues: false, headers: ['X-Custom': 'kept']]
+    Map originalParams = new LinkedHashMap(params)
+    originalParams.headers = new LinkedHashMap(params.headers)
+
+    when:
+    appScript.sendLocalJsonAsync([params: params, data: [command: 'play'], retryable: true])
+    Map request = appScript.asyncCalls.last().params
+
+    then:
+    params == originalParams
+    request !== params
+    request.headers !== params.headers
+    request.ignoreSSLIssues == false
+    request.headers == ['X-Custom': 'kept', 'X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000']
+    request.body == JsonOutput.toJson([command: 'play'])
   }
 
   void makeTopology(String groupId, String coordinatorId, String playerIds) {
