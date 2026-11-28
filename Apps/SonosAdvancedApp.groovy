@@ -354,6 +354,9 @@ preferences {
 @Field static final String READY_FOR_ZGT_STATE_KEY = 'readyForZgt'
 // A newly elected subscriber must deliver its first setZgtPayload within this window or it is evicted.
 @Field static final Long ZGT_ELECTION_PAYLOAD_TIMEOUT_MS = 300000L
+// A player told to release its ZGT subscription is not told again inside this window.
+@Field static final Long ZGT_RELEASE_COOLDOWN_MS = 60000L
+@Field static final String ZGT_RELEASE_REQUESTS_MEMORY_KEY = 'zgtReleaseRequests'
 @Field static final String LAST_PROCESSED_TOPOLOGY_STATE_KEY = 'lastProcessedTopologyByDni'
 @Field static final String ALARM_REQUEST_ATTRIBUTE = 'sonosAlarmRequest'
 @Field static final List<String> SHARED_PLAYER_PLAYBACK_ATTRIBUTES = [
@@ -528,7 +531,7 @@ preferences {
   AUDIO_CLIP_QUEUES_STATE_KEY, GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY, AVT_EVENTS_BY_DNI_STATE_KEY,
   PLAYER_READINGS_STATE_KEY, GROUP_RENDERING_STATE_KEY, PENDING_GROUP_RENDERING_STATE_KEY,
   DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY, PENDING_GROUP_STATE_QUEUE_KEY, CATALOG_SNAPSHOTS_MEMORY_KEY, GROUP_COMMAND_INBOX_MEMORY_KEY,
-  UNMUTE_RESTORE_LEVELS_MEMORY_KEY, HUB_SESSION_MEMORY_KEY
+  UNMUTE_RESTORE_LEVELS_MEMORY_KEY, HUB_SESSION_MEMORY_KEY, ZGT_RELEASE_REQUESTS_MEMORY_KEY
 ]
 @Field final List<String> ATOMIC_MIGRATED_STATE_KEYS = [
   ZGT_PAYLOAD_STATE_KEY,
@@ -3218,26 +3221,50 @@ Boolean playerAppRequest(Map request) {
  * ZGT_ELECTION_PAYLOAD_TIMEOUT_MS is evicted and the caller is elected in its place.
  */
 String readyForZgt(String dni) {
-  if(!dni) { return 'wait' }
+  return electZgt(dni).result
+}
+
+/**
+ * readyForZgt with the holder it displaced and the election's revision (its electedAt, which only grows). Writing
+ * the election is also what makes acceptZgtSource drop the old holder's payloads, so rejection and election are
+ * one atomic step. It shares appLock('zgt') with the payload owner check, so a payload that passed the check
+ * finishes writing topology before the election can change. The caller informs the winner first and only then
+ * relieves previousDni, in one callback, and every answer carries the revision so a late one is ignored.
+ */
+Map<String, Object> electZgt(String dni) {
+  if(!dni) { return [result: 'wait'] }
   Long nowMs = now()
   Boolean elected = false
-  Object ready = mutateAppData(READY_FOR_ZGT_STATE_KEY) { Object current ->
-    Map election = normalizeZgtElection(current, nowMs)
-    if(election != null && !zgtSubscriberAlive(election, nowMs)) {
-      logInfo("Evicting ZGT subscriber ${election.dni}: no longer live; electing ${dni}")
-      election = null
+  String previousDni = null
+  Object ready = null
+  synchronized(appLock('zgt')) {
+    ready = mutateAppData(READY_FOR_ZGT_STATE_KEY) { Object current ->
+      Map election = normalizeZgtElection(current, nowMs)
+      if(election != null && !zgtSubscriberAlive(election, nowMs)) {
+        logInfo("Evicting ZGT subscriber ${election.dni}: no longer live; electing ${dni}")
+        previousDni = election.dni?.toString()
+        election = null
+      }
+      if(election == null) {
+        elected = true
+        election = [dni: dni, electedAt: nowMs, deviceIp: zgtPlayerIp(dni), lastPayloadAt: null]
+      }
+      return election
     }
-    if(election == null) {
-      elected = true
-      election = [dni: dni, electedAt: nowMs, deviceIp: zgtPlayerIp(dni), lastPayloadAt: null]
-    }
-    return election
   }
   if(elected) {
     runInMillis(ZGT_ELECTION_PAYLOAD_TIMEOUT_MS + 1000L, 'checkZgtElectionPayload', [overwrite: true])
   }
   // Keep the winner stable across repeated initialize calls; only it may retry its subscription.
-  return ((Map)ready).dni == dni ? 'proceed' : 'wait'
+  Boolean won = ((Map)ready).dni == dni
+  Map<String, Object> outcome = [result: won ? 'proceed' : 'wait', revision: zgtElectionRevision((Map)ready)]
+  if(elected && previousDni && previousDni != dni) { outcome.previousDni = previousDni }
+  return outcome
+}
+
+/** The election's revision: when it was made, which only grows. */
+Long zgtElectionRevision(Map election) {
+  return (election?.electedAt ?: 0L) as Long
 }
 
 /** Read a stored election, accepting the legacy list shape (first entry was the winner). */
@@ -3270,14 +3297,16 @@ Boolean zgtSubscriberAlive(Map election, Long nowMs) {
 /** Clear the election when `dni` holds it. Returns true when it did, so the caller can start a re-election. */
 Boolean evictZgtSubscriber(String dni, String reason) {
   Boolean evicted = false
-  mutateAppData(READY_FOR_ZGT_STATE_KEY) { Object current ->
-    Map election = normalizeZgtElection(current, now())
-    if(election != null && election.dni == dni) {
-      logInfo("Evicting ZGT subscriber ${dni}: ${reason}")
-      evicted = true
-      return null
+  synchronized(appLock('zgt')) {
+    mutateAppData(READY_FOR_ZGT_STATE_KEY) { Object current ->
+      Map election = normalizeZgtElection(current, now())
+      if(election != null && election.dni == dni) {
+        logInfo("Evicting ZGT subscriber ${dni}: ${reason}")
+        evicted = true
+        return null
+      }
+      return current
     }
-    return current
   }
   if(evicted) { runInMillis(1, 'requestZgtReelection', [overwrite: false, data: [excludeDni: dni]]) }
   return evicted
@@ -3285,10 +3314,14 @@ Boolean evictZgtSubscriber(String dni, String reason) {
 
 /** Timer set at election: evict the winner when it never delivered a payload. */
 void checkZgtElectionPayload() {
-  Map election = normalizeZgtElection(atomicState[READY_FOR_ZGT_STATE_KEY], now())
-  if(election != null && election.lastPayloadAt == null && !zgtSubscriberAlive(election, now())) {
-    evictZgtSubscriber(election.dni?.toString(), 'no ZGT payload within the election window')
+  String staleDni = null
+  synchronized(appLock('zgt')) {
+    Map election = normalizeZgtElection(atomicState[READY_FOR_ZGT_STATE_KEY], now())
+    if(election != null && election.lastPayloadAt == null && !zgtSubscriberAlive(election, now())) {
+      staleDni = election.dni?.toString()
+    }
   }
+  if(staleDni) { evictZgtSubscriber(staleDni, 'no ZGT payload within the election window') }
 }
 
 /** Ask every other player to repeat its election request; the first eligible one becomes the subscriber. */
@@ -3328,10 +3361,12 @@ Boolean playerAppRequestHandler(Object event) {
       runInMillis(1, 'refreshPlayerPolicyCallback', [overwrite: false, data: [playerDni: playerDni]])
       return true
     case 'requestZgtElection':
-      // Answer from a scheduled execution so no child call runs inside this request.
+      // Answer from a scheduled execution so no child call runs inside this request. The election is already
+      // written, so the old holder's payloads are rejected; the winner is informed first, then the old holder.
+      Map<String, Object> outcome = electZgt(playerDni)
       runInMillis(1, 'deliverZgtElection', [
         overwrite: false,
-        data: [playerDni: playerDni, result: readyForZgt(playerDni)]
+        data: [playerDni: playerDni, result: outcome.result, revision: outcome.revision, releaseDni: outcome.previousDni]
       ])
       return true
     case 'reportPlayerOffline':
@@ -3383,13 +3418,21 @@ void publishGroupRenderingCallback(Map data) {
   if(!filtered.isEmpty()) { applyDirectGroupRendering(data.sourceId?.toString(), filtered) }
 }
 
-/** Deliver a ZGT election answer to its player after the requesting call has returned. */
+/**
+ * Deliver a ZGT election answer to its player after the requesting call has returned. A handoff is one callback:
+ * the winner hears first, then the displaced holder is released, so the two can never run in the other order.
+ * Both carry the election revision, which the driver uses to ignore an answer older than one it has acted on.
+ */
 void deliverZgtElection(Map data) {
   String playerDni = data?.playerDni?.toString()
+  Long revision = (data?.revision ?: 0L) as Long
   ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
-  if(player == null) { return }
-  try { player.zgtElectionResult(data.result?.toString()) }
-  catch(Exception e) { logWarn("Could not deliver ZGT election result to ${playerDni}: ${e.message}") }
+  if(player != null) {
+    try { player.zgtElectionResult(data.result?.toString(), revision) }
+    catch(Exception e) { logWarn("Could not deliver ZGT election result to ${playerDni}: ${e.message}") }
+  }
+  String releaseDni = data?.releaseDni?.toString()
+  if(releaseDni && releaseDni != playerDni) { deliverZgtRelease([playerDni: releaseDni, revision: revision]) }
 }
 
 /** Republish the complete latest leader AVT after a low-frequency settings save. */
@@ -6356,7 +6399,7 @@ void setZgtPayload(Map<String, Object> payload) {
     String coordinator = rawCoordinator?.toString()
     if(coordinator) {
       List<String> followers = rawFollowers instanceof Collection
-          ? ((Collection)rawFollowers).collect { Object id -> id?.toString() }.findAll { String id -> id && id != coordinator }.unique()
+          ? ((Collection)rawFollowers).collect { Object id -> id?.toString() }.findAll { String id -> id && id != coordinator }.unique().sort(false)
           : []
       followersByCoordinator[coordinator] = followers
     }
@@ -6367,16 +6410,72 @@ void setZgtPayload(Map<String, Object> payload) {
     if(groupId) { groupNamesById[groupId] = rawName?.toString() ?: groupId }
   }
   Map<String, Object> snapshot = [followersByCoordinator: followersByCoordinator, groupNamesById: groupNamesById]
-  Boolean stored = false
+  Boolean publish = false
   synchronized(appLock('zgt')) {
+    // The owner check and the topology write share the lock the election changes under, so a report that passed
+    // the check cannot land after a handoff. A payload a player fetched on request (GetZoneGroupState) is not a
+    // subscription delivery, so any player may send it.
+    if(payload.requested != true && !acceptZgtSource(payload.sourceDni?.toString())) { return }
     if(!acceptSequence("${payload.sourceDni}:zgt".toString(), payload.epoch, payload.sequence)) { return }
-    atomicState[ZGT_PAYLOAD_STATE_KEY] = snapshot
+    Object previousSnapshot = atomicState[ZGT_PAYLOAD_STATE_KEY]
     recordZgtPayloadDelivery(payload.sourceDni?.toString())
-    storeUpnpTopology([sourceDni: 'elected-subscriber',
-        eventsByGroupId: buildZgtEventProjection(snapshot)])
-    stored = true
+    // Sonos repeats unchanged topology and reorders members between reports. Followers are sorted above, so an
+    // equal snapshot means the topology did not change: skip the store and the volume recalculation. The roster
+    // projection commits per key when an execution ends, so two reports can commit in the wrong order; the skip
+    // therefore also requires the stored projection to match, and a repeated current report repairs a stale one.
+    // Player names are resolved live, so a rename or recreated child still needs publication;
+    // changedChildAttributes makes the no-change case emit nothing.
+    publish = true
+    Map<String, List<Map>> projection = buildZgtEventProjection(snapshot)
+    if(!(previousSnapshot instanceof Map && previousSnapshot == snapshot && getStoredZgtEventsMap() == projection)) {
+      atomicState[ZGT_PAYLOAD_STATE_KEY] = snapshot
+      storeUpnpTopology([sourceDni: 'elected-subscriber', eventsByGroupId: projection])
+    }
   }
-  if(stored) { runInMillis(1, 'publishZgtPlayerAttributes', [overwrite: true]) }
+  if(publish) { runInMillis(1, 'publishZgtPlayerAttributes', [overwrite: true]) }
+}
+
+/**
+ * Only the elected subscriber's ZGT deliveries are topology. A delivery from anyone else comes from a subscription
+ * that should not exist (an evicted or superseded player), so it is dropped and that player is told to release it.
+ * With no election on record (after an eviction) nothing is accepted until the next election.
+ * App data only (no child calls), so it is safe to run from a child entry point.
+ */
+Boolean acceptZgtSource(String sourceDni) {
+  if(!sourceDni) { return false }
+  Map election = normalizeZgtElection(atomicState[READY_FOR_ZGT_STATE_KEY], now())
+  if(election == null) {
+    // Between an eviction and the next election nobody owns ZGT. A late payload must not reinstate the evicted
+    // player; the next player to ask is elected. No release either: an election is about to happen.
+    logDebug("Dropping ZGT payload from ${sourceDni}; no subscriber is elected")
+    return false
+  }
+  if(election.dni == sourceDni) { return true }
+  logDebug("Dropping ZGT payload from ${sourceDni}; the elected subscriber is ${election.dni}")
+  requestZgtRelease(sourceDni, zgtElectionRevision(election))
+  return false
+}
+
+/** Ask a non-elected player to release its ZGT subscription from a new execution, at most once per cooldown. */
+void requestZgtRelease(String playerDni, Long revision) {
+  Long nowMs = now()
+  Boolean due = (Boolean)withMemoryMap(ZGT_RELEASE_REQUESTS_MEMORY_KEY) { Map<String, Object> requested ->
+    Long last = requested[playerDni] as Long
+    if(last != null && nowMs - last < ZGT_RELEASE_COOLDOWN_MS) { return false }
+    requested[playerDni] = nowMs
+    return true
+  }
+  if(!due) { return }
+  logInfo("Telling ${playerDni} to release its ZGT subscription; it is not the elected subscriber")
+  runInMillis(1, 'deliverZgtRelease', [overwrite: false, data: [playerDni: playerDni, revision: revision]])
+}
+
+void deliverZgtRelease(Map data) {
+  String playerDni = data?.playerDni?.toString()
+  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
+  if(player == null) { return }
+  try { player.releaseZgtOwnership((data?.revision ?: 0L) as Long) }
+  catch(Exception e) { logWarn("Could not tell ${playerDni} to release its ZGT subscription: ${e.message}") }
 }
 
 /** Mark the elected subscriber as delivering payloads, which ends its first-payload deadline. */
@@ -6442,6 +6541,7 @@ void publishZgtPlayerAttributes() {
     coordinatorByPlayer[coordinator] = coordinator
     (ids ?: []).each { String rincon -> coordinatorByPlayer[rincon] = coordinator }
   }
+  followers = sortedZgtFollowers(followers)
   getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
     String rincon = player?.getDataValue('id')?.toString() ?: player?.getDeviceNetworkId()?.toString()
     if(!rincon) { return }
@@ -6461,12 +6561,21 @@ void publishZgtPlayerAttributes() {
       isGroupCoordinator: rincon == coordinator ? 'on' : 'off',
       isGrouped: members.size() > 1 ? 'on' : 'off'
     ]
-    sendChildAttributeEvents(player, attributes)
+    sendChildAttributeEvents(player, changedChildAttributes(player, attributes))
   }
   publishZgtGroupAttributes(followers)
 }
 
-/** Publish live membership and exact configuration status to every group child. */
+/** Each coordinator's followers in one stable order, computed once per publication (stored snapshots may predate sorting). */
+Map<String, List<String>> sortedZgtFollowers(Map<String, List<String>> followersByCoordinator) {
+  Map<String, List<String>> sorted = [:]
+  (followersByCoordinator ?: [:]).each { String coordinator, List<String> followers ->
+    sorted[coordinator] = (followers ?: []).sort(false)
+  }
+  return sorted
+}
+
+/** Publish live membership and exact configuration status to every group child; followers must be pre-sorted. */
 void publishZgtGroupAttributes(Map<String, List<String>> followersByCoordinator) {
   Map<String, String> coordinatorByPlayer = [:]
   (followersByCoordinator ?: [:]).each { String coordinator, List<String> followers ->
@@ -6500,10 +6609,11 @@ void publishZgtGroupAttributes(Map<String, List<String>> followersByCoordinator)
       player?.getDataValue('name')?.toString() ?: player?.label?.toString() ?: id
     }
     String joinedPlayers = memberNames.join(', ')
-    deliverGroupAttributes(groupDevice, [
+    Map<String, Object> groupChanges = changedChildAttributes(groupDevice, [
       currentlyJoinedPlayers: joinedPlayers,
       switch: exactMatch ? 'on' : 'off'
     ])
+    if(!groupChanges.isEmpty()) { deliverGroupAttributes(groupDevice, groupChanges) }
   }
 }
 
@@ -6570,7 +6680,7 @@ void storeUpnpTopology(Map notification) {
   Map<String, List<Map>> previous = getStoredZgtEventsMap()
   putZgtTopology(sourceDni, next)
   // Group membership changes move every derived group volume and mute value.
-  if(buildLiveGroupRosters(previous) != buildLiveGroupRosters(getStoredZgtEventsMap())) {
+  if(rosterMembershipByCoordinator(previous) != rosterMembershipByCoordinator(getStoredZgtEventsMap())) {
     queueVolumeRecalculation([], [], true)
   }
 }
@@ -6902,6 +7012,24 @@ Map<String, List<String>> buildLiveGroupRosters(Map<String, List<Map>> topology)
     rosters[coordinatorId] = members.unique()
   }
   return rosters
+}
+
+/** Live rosters as coordinator -> member set, so a change of member order alone is not a membership change. */
+Map<String, Set<String>> rosterMembershipByCoordinator(Map<String, List<Map>> topology) {
+  Map<String, Set<String>> membership = [:]
+  buildLiveGroupRosters(topology).each { String coordinatorId, List<String> members ->
+    membership[coordinatorId] = new LinkedHashSet<String>(members)
+  }
+  return membership
+}
+
+/** Only the attributes whose value differs from the device's current value, so unchanged values cost no sendEvent. */
+Map<String, Object> changedChildAttributes(ChildDeviceWrapper child, Map<String, Object> attributes) {
+  Map<String, Object> changed = [:]
+  attributes.each { String name, Object value ->
+    if(child.currentValue(name)?.toString() != value?.toString()) { changed[name] = value }
+  }
+  return changed
 }
 
 /** The player's live Sonos group members; an unknown or ungrouped player is its own group. */

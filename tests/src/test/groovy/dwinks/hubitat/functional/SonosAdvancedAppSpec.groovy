@@ -18,9 +18,23 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 
   List<String> reads = []
   List<String> zgtElectionResults = []
+  List<Long> zgtElectionRevisions = []
+  List<Long> zgtReleaseRevisions = []
   Integer zgtReelectionRequests = 0
+  // Order in which the app told players about an election, across every player double.
+  static List<String> zgtCallOrder = Collections.synchronizedList([])
 
-  void zgtElectionResult(String result) { zgtElectionResults << result }
+  void zgtElectionResult(String result, Long revision) {
+    zgtElectionResults << result
+    zgtElectionRevisions << revision
+    zgtCallOrder << "result:${deviceNetworkId}".toString()
+  }
+  Integer zgtReleases = 0
+  void releaseZgtOwnership(Long revision) {
+    zgtReleases++
+    zgtReleaseRevisions << revision
+    zgtCallOrder << "release:${deviceNetworkId}".toString()
+  }
   void reevaluateZgtElection() { zgtReelectionRequests++ }
 
   Object getSetting(String name) { reads << "getSetting:${name}".toString(); return settings[name] }
@@ -232,6 +246,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.clear()
     topologyObservationSequence = 0L
     rcObservationSequence = 0L
+    SonosAppPlayerDouble.zgtCallOrder.clear()
 
     group = new SonosAppGroupDouble(deviceNetworkId: 'GROUP-DNI', displayName: 'Test Group', label: 'Test Group')
     group.dataValues.groupCoordinatorId = 'RINCON_COORD'
@@ -242,6 +257,14 @@ class SonosAdvancedAppSpec extends Specification {
 
     appScript.children = [group, coordinator, follower, extra]
     appScript.app.children = appScript.children
+    // Topology tests assume the coordinator is the elected ZGT subscriber. Election tests start from an empty
+    // election through clearZgtElection().
+    appScript.atomicState.readyForZgt = [dni: coordinator.deviceNetworkId, electedAt: appScript.now(), deviceIp: null, lastPayloadAt: appScript.now()]
+  }
+
+  private void clearZgtElection() {
+    appScript.atomicState.remove('readyForZgt')
+    assert appScript.atomicState.readyForZgt == null
   }
 
   def "orphan pruning removes the retired last sent child state cache"() {
@@ -257,6 +280,9 @@ class SonosAdvancedAppSpec extends Specification {
   }
 
   def "ZGT election request is answered from a scheduled delivery, never inline"() {
+    given:
+    clearZgtElection()
+
     when:
     appScript.playerAppRequestHandler([channel: 'playerAppRequest', action: 'requestZgtElection',
       sourceDni: coordinator.deviceNetworkId, requestId: 'zgt-1', args: [:]])
@@ -271,9 +297,13 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     coordinator.zgtElectionResults == ['proceed']
+    coordinator.zgtElectionRevisions == [appScript.atomicState.readyForZgt.electedAt]
   }
 
   def "first player reporting ready wins ZGT subscription and winner can retry"() {
+    given:
+    clearZgtElection()
+
     expect:
     appScript.readyForZgt(coordinator.deviceNetworkId) == 'proceed'
     appScript.readyForZgt(follower.deviceNetworkId) == 'wait'
@@ -318,6 +348,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "ZGT winner that never sends a payload is replaced after the election window"() {
     given:
+    appScript.atomicState.remove('readyForZgt')
     appScript.readyForZgt(coordinator.deviceNetworkId)
     appScript.atomicState.readyForZgt = appScript.atomicState.readyForZgt + [electedAt: appScript.now() - 400000L]
 
@@ -347,6 +378,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "ZGT winner whose IP changed is replaced by the next requester"() {
     given:
+    appScript.atomicState.remove('readyForZgt')
     coordinator.dataValues.deviceIp = '192.168.1.10'
     appScript.readyForZgt(coordinator.deviceNetworkId)
 
@@ -752,6 +784,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "readyForZgt elects exactly one winner under concurrent election requests"() {
     given:
+    clearZgtElection()
     List<String> dnis = [coordinator, follower, extra]*.deviceNetworkId
 
     when:
@@ -764,6 +797,8 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     appScript.atomicState.readyForZgt.dni in dnis
     results.count { it == 'proceed' } >= 1
+    results.size() == 8
+    results.every { it in ['proceed', 'wait'] }
   }
 
   def "app lock helpers do not lose updates across threads"() {
@@ -818,6 +853,9 @@ class SonosAdvancedAppSpec extends Specification {
   }
 
   def "empty DNI is not registered as ready for ZGT"() {
+    setup:
+    appScript.atomicState.remove('readyForZgt')
+
     expect:
     appScript.readyForZgt(null) == 'wait'
     appScript.atomicState.readyForZgt == null
@@ -4260,7 +4298,7 @@ class SonosAdvancedAppSpec extends Specification {
     extra.updateDataValue('name', 'Office')
 
     when:
-    appScript.setZgtPayload([
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, 
       followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']],
       groupNamesById: ['RINCON_COORD:123': 'Downstairs']
     ])
@@ -4302,9 +4340,270 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.scheduled.any { List job -> job[1] == 'drainQueuedChildEvents' }
   }
 
+  def "a ZGT report that only reorders followers changes no events"() {
+    given:
+    coordinator.updateDataValue('name', 'Living Room')
+    follower.updateDataValue('name', 'Kitchen')
+    extra.updateDataValue('name', 'Office')
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, epoch: 1L, sequence: 1L,
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW', 'RINCON_EXTRA']],
+      groupNamesById: ['RINCON_COORD:1': 'Downstairs']])
+    appScript.publishZgtPlayerAttributes()
+    runScheduledCallbacks()
+    [coordinator, follower, extra, group]*.events*.clear()
+    appScript.scheduled.clear()
+
+    when:
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, epoch: 1L, sequence: 2L,
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_EXTRA', 'RINCON_FOLLOW']],
+      groupNamesById: ['RINCON_COORD:1': 'Downstairs']])
+
+    then:
+    appScript.atomicState.zgtPayload.followersByCoordinator.RINCON_COORD == ['RINCON_EXTRA', 'RINCON_FOLLOW']
+    appScript.scheduled*.getAt(1) == ['publishZgtPlayerAttributes']
+
+    when:
+    appScript.publishZgtPlayerAttributes()
+
+    then:
+    [coordinator, follower, extra, group].every { it.events.isEmpty() }
+  }
+
+  def "roster comparison ignores member order but still detects real membership changes"() {
+    given:
+    Map<String, List<Map>> before = ['G': [[name: 'groupCoordinatorId', value: 'A'], [name: 'groupPlayerIds', value: 'A,B,C']]]
+    Map<String, List<Map>> reordered = ['G': [[name: 'groupCoordinatorId', value: 'A'], [name: 'groupPlayerIds', value: 'A,C,B']]]
+    Map<String, List<Map>> changed = ['G': [[name: 'groupCoordinatorId', value: 'A'], [name: 'groupPlayerIds', value: 'A,B']]]
+
+    expect:
+    appScript.rosterMembershipByCoordinator(before) == appScript.rosterMembershipByCoordinator(reordered)
+    appScript.rosterMembershipByCoordinator(before) != appScript.rosterMembershipByCoordinator(changed)
+  }
+
+  def "a topology publication emits only the attributes that differ from the device's current values"() {
+    given:
+    coordinator.updateDataValue('name', 'Living Room')
+    follower.updateDataValue('name', 'Kitchen')
+    extra.updateDataValue('name', 'Office')
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, epoch: 1L, sequence: 1L,
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']], groupNamesById: ['RINCON_COORD:1': 'Downstairs']])
+    appScript.publishZgtPlayerAttributes()
+    [coordinator, follower, extra, group]*.events*.clear()
+
+    when: 'the extra player joins the group'
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, epoch: 1L, sequence: 2L,
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW', 'RINCON_EXTRA']], groupNamesById: ['RINCON_COORD:1': 'Downstairs']])
+    appScript.publishZgtPlayerAttributes()
+
+    then: 'the follower, whose view of the group did change in membership, gets only the membership attributes'
+    follower.events*.name as Set == ['groupMemberCount', 'groupMemberNames', 'groupPlayerIds'] as Set
+    coordinator.events*.name as Set == ['groupMemberCount', 'groupMemberNames', 'groupPlayerIds'] as Set
+    extra.events*.name as Set == ['groupCoordinatorId', 'groupCoordinatorName', 'groupId', 'groupMemberCount',
+      'groupMemberNames', 'groupPlayerIds', 'isGroupCoordinator', 'isGrouped'] as Set
+    group.events*.name.containsAll(['currentlyJoinedPlayers', 'switch'])
+    group.currentValues.currentlyJoinedPlayers == 'Living Room, Office, Kitchen'
+  }
+
+  def "an identical ZGT snapshot still publishes a renamed follower"() {
+    given:
+    coordinator.updateDataValue('name', 'Living Room')
+    follower.updateDataValue('name', 'Kitchen')
+    Map groups = [followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']], groupNamesById: ['RINCON_COORD:1': 'Downstairs']]
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, epoch: 1L, sequence: 1L] + groups)
+    appScript.publishZgtPlayerAttributes()
+    [coordinator, follower, extra, group]*.events*.clear()
+
+    when: 'a follower is renamed and the same topology is reported again'
+    follower.updateDataValue('name', 'Pantry')
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, epoch: 1L, sequence: 2L] + groups)
+    appScript.publishZgtPlayerAttributes()
+
+    then:
+    coordinator.currentValues.groupMemberNames.contains('Pantry')
+    follower.currentValues.groupMemberNames.contains('Pantry')
+  }
+
+  def "ZGT from a player that is not the elected subscriber is dropped and that player is told to release it"() {
+    given:
+    appScript.atomicState.readyForZgt = [dni: coordinator.deviceNetworkId, electedAt: appScript.now(), deviceIp: null, lastPayloadAt: appScript.now()]
+    Map stranger = [sourceDni: follower.deviceNetworkId, epoch: 1L, sequence: 1L,
+      followersByCoordinator: ['RINCON_FOLLOW': []], groupNamesById: ['RINCON_FOLLOW:1': 'Intruder']]
+
+    when:
+    appScript.setZgtPayload(stranger)
+    appScript.setZgtPayload(stranger + [sequence: 2L])
+
+    then: 'nothing was stored, published or written to a child inline'
+    appScript.atomicState.zgtPayload == null
+    !appScript.scheduled.any { List job -> job[1] == 'publishZgtPlayerAttributes' }
+    follower.zgtReleases == 0
+    appScript.atomicState.readyForZgt.dni == coordinator.deviceNetworkId
+
+    and: 'one release instruction is queued inside the cooldown'
+    appScript.scheduled.count { List job -> job[1] == 'deliverZgtRelease' } == 1
+
+    when:
+    runScheduledCallbacks(['deliverZgtRelease'])
+
+    then:
+    follower.zgtReleases == 1
+    coordinator.zgtReleases == 0
+  }
+
+  def "ZGT from the elected subscriber is accepted"() {
+    given:
+    appScript.atomicState.readyForZgt = [dni: coordinator.deviceNetworkId, electedAt: appScript.now(), deviceIp: null, lastPayloadAt: null]
+
+    when:
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, epoch: 1L, sequence: 1L,
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']], groupNamesById: ['RINCON_COORD:1': 'Downstairs']])
+
+    then:
+    appScript.atomicState.zgtPayload.groupNamesById == ['RINCON_COORD:1': 'Downstairs']
+    appScript.atomicState.readyForZgt.lastPayloadAt != null
+    !appScript.scheduled.any { List job -> job[1] == 'deliverZgtRelease' }
+  }
+
+  def "a topology snapshot a non-elected player fetched on request is accepted without a release"() {
+    given:
+    appScript.atomicState.readyForZgt = [dni: coordinator.deviceNetworkId, electedAt: appScript.now(), deviceIp: null, lastPayloadAt: appScript.now()]
+
+    when:
+    appScript.setZgtPayload([sourceDni: follower.deviceNetworkId, requested: true, epoch: 1L, sequence: 1L,
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']], groupNamesById: ['RINCON_COORD:1': 'Downstairs']])
+
+    then:
+    appScript.atomicState.zgtPayload.groupNamesById == ['RINCON_COORD:1': 'Downstairs']
+    !appScript.scheduled.any { List job -> job[1] == 'deliverZgtRelease' }
+  }
+
+  def "between an eviction and the next election a late ZGT payload is dropped and does not reinstate the evicted player"() {
+    given:
+    appScript.evictZgtSubscriber(coordinator.deviceNetworkId, 'test')
+    appScript.scheduled.clear()
+
+    when:
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, epoch: 1L, sequence: 1L,
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']], groupNamesById: ['RINCON_COORD:1': 'Downstairs']])
+
+    then: 'nothing is stored, nobody is elected, and no release is queued while an election is pending'
+    appScript.atomicState.zgtPayload == null
+    appScript.atomicState.readyForZgt == null
+    !appScript.scheduled.any { List job -> job[1] == 'deliverZgtRelease' }
+
+    and: 'the next player to ask is elected and its payloads are accepted'
+    appScript.electZgt(follower.deviceNetworkId).result == 'proceed'
+    appScript.setZgtPayload([sourceDni: follower.deviceNetworkId, epoch: 1L, sequence: 1L,
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']], groupNamesById: ['RINCON_COORD:1': 'Downstairs']])
+    appScript.atomicState.zgtPayload != null
+  }
+
+  def "a handoff is one callback that informs the winner, then releases the displaced holder, with one revision"() {
+    given:
+    appScript.atomicState.readyForZgt = [dni: coordinator.deviceNetworkId, electedAt: appScript.now() - 400000L, deviceIp: null, lastPayloadAt: null]
+    appScript.scheduled.clear()
+
+    when:
+    appScript.playerAppRequestHandler([channel: 'playerAppRequest', action: 'requestZgtElection',
+      sourceDni: follower.deviceNetworkId, requestId: 'zgt-2', args: [:]])
+
+    then: 'the election is already written, so the old holder is rejected before anyone is informed'
+    appScript.atomicState.readyForZgt.dni == follower.deviceNetworkId
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, epoch: 1L, sequence: 1L,
+      followersByCoordinator: ['RINCON_COORD': []], groupNamesById: ['RINCON_COORD:1': 'Old']]) == null
+    appScript.atomicState.zgtPayload == null
+
+    and: 'exactly one handoff callback is queued and no separate release job can overtake it'
+    appScript.scheduled.count { List job -> job[1] == 'deliverZgtElection' } == 1
+    appScript.scheduled.count { List job -> job[1] == 'deliverZgtRelease' } == 1
+
+    when: 'the dropped payload already queued its own cooldown-limited release; only the handoff is under test'
+    appScript.scheduled.removeAll { List job -> job[1] == 'deliverZgtRelease' }
+    Map data = appScript.scheduled.find { List job -> job[1] == 'deliverZgtElection' }[2].data
+    Long revision = appScript.atomicState.readyForZgt.electedAt as Long
+    appScript.deliverZgtElection(data)
+
+    then: 'the winner hears first, then the old holder is released, both at the election revision'
+    data.releaseDni == coordinator.deviceNetworkId
+    data.revision == revision
+    SonosAppPlayerDouble.zgtCallOrder == ["result:${follower.deviceNetworkId}".toString(), "release:${coordinator.deviceNetworkId}".toString()]
+    follower.zgtElectionResults == ['proceed']
+    follower.zgtElectionRevisions == [revision]
+    coordinator.zgtReleaseRevisions == [revision]
+    follower.zgtReleases == 0
+  }
+
+  def "a release for a non-owner's stray payload carries the current election revision"() {
+    given:
+    Long electedAt = appScript.now()
+    appScript.atomicState.readyForZgt = [dni: coordinator.deviceNetworkId, electedAt: electedAt, deviceIp: null, lastPayloadAt: electedAt]
+
+    when:
+    appScript.setZgtPayload([sourceDni: follower.deviceNetworkId, epoch: 1L, sequence: 1L,
+      followersByCoordinator: ['RINCON_FOLLOW': []], groupNamesById: ['RINCON_FOLLOW:1': 'Intruder']])
+    runScheduledCallbacks(['deliverZgtRelease'])
+
+    then:
+    follower.zgtReleaseRevisions == [electedAt]
+  }
+
+  def "a topology report cannot be accepted across an election change: the owner check and the election share one lock"() {
+    given:
+    Object zgtLock = appScript.appLock('zgt')
+    Boolean electionFinished = false
+    Boolean unchangedWhileLocked = false
+    Thread election
+    appScript.atomicState.readyForZgt = [dni: coordinator.deviceNetworkId, electedAt: appScript.now() - 400000L, deviceIp: null, lastPayloadAt: null]
+
+    when: 'the zgt lock is held, as it is while a report that passed the owner check writes topology'
+    synchronized(zgtLock) {
+      election = Thread.start {
+        appScript.electZgt(follower.deviceNetworkId)
+        electionFinished = true
+      }
+      Thread.sleep(300)
+      unchangedWhileLocked = !electionFinished && appScript.atomicState.readyForZgt.dni == coordinator.deviceNetworkId
+    }
+    election.join(5000)
+
+    then: 'the election waited for the lock and applied only after it was released'
+    unchangedWhileLocked
+    electionFinished
+    appScript.atomicState.readyForZgt.dni == follower.deviceNetworkId
+  }
+
+  def "an equal ZGT snapshot whose stored roster projection is stale repairs the roster"() {
+    given:
+    Closure<Map> payload = { Long seq -> [sourceDni: coordinator.deviceNetworkId, epoch: 1L, sequence: seq,
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW', 'RINCON_EXTRA']], groupNamesById: ['RINCON_COORD:1': 'Downstairs']] }
+    appScript.setZgtPayload(payload(1L))
+    Map<String, List<Map>> current = appScript.getStoredZgtEventsMap()
+    assert current['RINCON_COORD:1'].find { it.name == 'groupPlayerIds' }.value == 'RINCON_COORD,RINCON_EXTRA,RINCON_FOLLOW'
+
+    and: 'a reverse-order commit left an older roster behind while the snapshot stayed current'
+    appScript.state.zgtEventsByGroupId = ['RINCON_COORD:1': current['RINCON_COORD:1'].collect { Map e ->
+      e.name == 'groupPlayerIds' ? [name: 'groupPlayerIds', value: 'RINCON_COORD'] : e }]
+    appScript.scheduled.clear()
+
+    when:
+    appScript.setZgtPayload(payload(2L))
+
+    then:
+    appScript.getStoredZgtEventsMap()['RINCON_COORD:1'].find { it.name == 'groupPlayerIds' }.value == 'RINCON_COORD,RINCON_EXTRA,RINCON_FOLLOW'
+    appScript.scheduled.any { List job -> job[1] == 'recalculateVolumeStateCallback' }
+  }
+
+  def "ZGT without a source player is dropped"() {
+    when:
+    appScript.setZgtPayload([followersByCoordinator: ['RINCON_COORD': []], groupNamesById: ['RINCON_COORD:1': 'X']])
+
+    then:
+    appScript.atomicState.zgtPayload == null
+  }
+
   def "a later ZGT snapshot resets every player omitted from its groups"() {
     given:
-    appScript.setZgtPayload([
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, 
       followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']],
       groupNamesById: ['RINCON_COORD:old': 'Old Group']
     ])
@@ -4314,22 +4613,22 @@ class SonosAdvancedAppSpec extends Specification {
     extra.events.clear()
 
     when:
-    appScript.setZgtPayload([
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, 
       followersByCoordinator: ['RINCON_EXTRA': []],
       groupNamesById: ['RINCON_EXTRA:new': 'Office']
     ])
     appScript.publishZgtPlayerAttributes()
 
     then:
-    coordinator.emittedAttributes().groupCoordinatorId == 'RINCON_COORD'
-    coordinator.emittedAttributes().groupId == ''
-    coordinator.emittedAttributes().isGrouped == 'off'
-    follower.emittedAttributes().groupCoordinatorId == 'RINCON_FOLLOW'
-    follower.emittedAttributes().groupId == ''
-    follower.emittedAttributes().isGrouped == 'off'
-    extra.emittedAttributes().groupId == 'RINCON_EXTRA:new'
-    group.emittedAttributes().currentlyJoinedPlayers == ''
-    group.emittedAttributes().switch == 'off'
+    coordinator.currentValues.groupCoordinatorId == 'RINCON_COORD'
+    coordinator.currentValues.groupId == ''
+    coordinator.currentValues.isGrouped == 'off'
+    follower.currentValues.groupCoordinatorId == 'RINCON_FOLLOW'
+    follower.currentValues.groupId == ''
+    follower.currentValues.isGrouped == 'off'
+    extra.currentValues.groupId == 'RINCON_EXTRA:new'
+    group.currentValues.currentlyJoinedPlayers == ''
+    group.currentValues.switch == 'off'
   }
 
   def "ZGT group switch requires the configured coordinator and exact follower roster"() {
@@ -4339,51 +4638,51 @@ class SonosAdvancedAppSpec extends Specification {
     extra.updateDataValue('name', 'Office')
 
     when: 'the configured coordinator and all configured followers match exactly'
-    appScript.setZgtPayload([
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, 
       followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']],
       groupNamesById: ['RINCON_COORD:exact': 'Exact']
     ])
     appScript.publishZgtPlayerAttributes()
 
     then:
-    group.emittedAttributes().switch == 'on'
-    group.emittedAttributes().currentlyJoinedPlayers == 'Living Room, Kitchen'
+    group.currentValues.switch == 'on'
+    group.currentValues.currentlyJoinedPlayers == 'Living Room, Kitchen'
 
     when: 'a configured follower is missing'
     group.events.clear()
-    appScript.setZgtPayload([
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, 
       followersByCoordinator: ['RINCON_COORD': []],
       groupNamesById: ['RINCON_COORD:missing': 'Missing']
     ])
     appScript.publishZgtPlayerAttributes()
 
     then:
-    group.emittedAttributes().switch == 'off'
-    group.emittedAttributes().currentlyJoinedPlayers == 'Living Room'
+    group.currentValues.switch == 'off'
+    group.currentValues.currentlyJoinedPlayers == 'Living Room'
 
     when: 'an unconfigured extra follower is present'
     group.events.clear()
-    appScript.setZgtPayload([
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, 
       followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW', 'RINCON_EXTRA']],
       groupNamesById: ['RINCON_COORD:extra': 'Extra']
     ])
     appScript.publishZgtPlayerAttributes()
 
     then:
-    group.emittedAttributes().switch == 'off'
-    group.emittedAttributes().currentlyJoinedPlayers == 'Living Room, Kitchen, Office'
+    group.currentValues.switch == 'off'
+    group.currentValues.currentlyJoinedPlayers == 'Living Room, Office, Kitchen'
 
     when: 'the configured coordinator is only a follower under a different active coordinator'
     group.events.clear()
-    appScript.setZgtPayload([
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, 
       followersByCoordinator: ['RINCON_FOLLOW': ['RINCON_COORD']],
       groupNamesById: ['RINCON_FOLLOW:leader-changed': 'Leader Changed']
     ])
     appScript.publishZgtPlayerAttributes()
 
     then:
-    group.emittedAttributes().switch == 'off'
-    group.emittedAttributes().currentlyJoinedPlayers == 'Kitchen, Living Room'
+    group.currentValues.switch == 'off'
+    group.currentValues.currentlyJoinedPlayers == 'Kitchen, Living Room'
   }
 
   def "every group child receives both ZGT states even when its coordinator is missing"() {
@@ -4394,7 +4693,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.app.children = appScript.children
 
     when:
-    appScript.setZgtPayload([followersByCoordinator: ['RINCON_COORD': []],
+    appScript.setZgtPayload([sourceDni: coordinator.deviceNetworkId, followersByCoordinator: ['RINCON_COORD': []],
       groupNamesById: ['RINCON_COORD:solo': 'Solo']])
     appScript.publishZgtPlayerAttributes()
 

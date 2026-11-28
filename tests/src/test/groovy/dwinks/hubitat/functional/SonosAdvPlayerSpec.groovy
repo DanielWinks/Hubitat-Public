@@ -2552,6 +2552,126 @@ class SonosAdvPlayerSpec extends Specification {
     driver.upnpRequestQueues.clear()
   }
 
+  def "a player that does not own the ZGT election releases the ZGT and AlarmClock subscriptions it holds"() {
+    given:
+    List<String> released = []
+    driver.metaClass.unsubscribeFromZgtEvents = { -> released << 'zgt' }
+    driver.metaClass.unsubscribeFromAlarmClockEvents = { -> released << 'alarmClock' }
+    driver.setSid('zgt', 'uuid:zgt')
+    driver.setSid('alarmClock', 'uuid:alarm')
+
+    when:
+    driver.zgtElectionResult('wait', 1L)
+
+    then:
+    released == ['zgt', 'alarmClock']
+  }
+
+  def "a delayed election answer or release from an older revision cannot undo a later election"() {
+    given:
+    List<String> released = []
+    List<String> subscribed = []
+    driver.device.dataValues.hasBattery = 'false'
+    driver.metaClass.unsubscribeFromZgtEvents = { -> released << 'zgt' }
+    driver.metaClass.subscribeToZgtEvents = { -> subscribed << 'zgt' }
+    driver.metaClass.subscribeToAlarmClockEvents = { -> }
+    driver.metaClass.subscribeToMrGrcEvents = { -> }
+    driver.metaClass.getParent = { -> new Expando(playerAppRequest: { Map payload -> true }) }
+    driver.initialize()
+    driver.runtimeState[driver.ZGT_ELIGIBLE_RUNTIME_KEY] = true
+
+    when: 'the player wins revision 20 and then a release and a wait from revision 10 arrive late'
+    driver.zgtElectionResult('proceed', 20L)
+    driver.setSid('zgt', 'uuid:zgt')
+    driver.releaseZgtOwnership(10L)
+    driver.zgtElectionResult('wait', 10L)
+
+    then: 'it still owns the subscription and nothing was released'
+    driver.isCatalogRefreshOwner()
+    released.isEmpty()
+    subscribed == ['zgt']
+
+    when: 'a release from a newer election does apply'
+    driver.releaseZgtOwnership(30L)
+
+    then:
+    !driver.isCatalogRefreshOwner()
+    released == ['zgt']
+  }
+
+  def "losing ownership cancels queued and retrying ZGT work but leaves other subscriptions alone"() {
+    given:
+    Map entry = driver.getUpnpRequestQueue()
+    entry.queue << [guid: 'q1', operation: 'subscribe', sidKey: 'zgt', phase: 'queued']
+    entry.queue << [guid: 'q2', operation: 'renew', sidKey: 'alarmClock', phase: 'queued']
+    entry.queue << [guid: 'q3', operation: 'subscribe', sidKey: 'avTransport', phase: 'queued']
+    driver.scheduled << [60, 'retryUpnpZgt', [data: [request: [sidKey: 'zgt']]]]
+
+    when:
+    driver.releaseZgtOwnership(7L)
+
+    then:
+    (entry.queue as List<Map>)*.guid == ['q3']
+
+    and: 'a retry that was already due is ignored while this player is not the subscriber'
+    driver.retryUpnpRequest([request: [guid: 'r1', operation: 'subscribe', sidKey: 'zgt', lifecycleGeneration: entry.generation]])
+    (entry.queue as List<Map>)*.guid == ['q3']
+
+    cleanup:
+    driver.upnpRequestQueues.clear()
+  }
+
+  def "a SUBSCRIBE that completes after ownership was lost is released instead of installed"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    Map entry = driver.getUpnpRequestQueue()
+    Closure<Map> inFlight = { String guid ->
+      Map request = [guid: guid, operation: 'subscribe', sidKey: 'zgt', phase: 'waiting', expectedCurrentSid: null,
+        subscribeMethod: 'subscribeToZgtEvents', resub: 'resubscribeToZgtEvents', attempts: 1, lifecycleGeneration: entry.generation]
+      entry.active = request
+      return request
+    }
+
+    when: 'this player owns the subscription'
+    driver.runtimeState[driver.CATALOG_REFRESH_OWNER_RUNTIME_KEY] = true
+    Map owned = inFlight('own')
+    driver.completeUpnpCurrent(entry, owned, [status: 200, headers: [sid: 'uuid:zgt-own', timeout: 'Second-3600']], null)
+
+    then: 'the lease is installed and renewal is scheduled'
+    driver.getSid('zgt') == 'uuid:zgt-own'
+    driver.scheduled.any { List job -> job[1] == 'resubscribeToZgtEvents' }
+    rawRequests.isEmpty()
+
+    when: 'ownership is lost while a second SUBSCRIBE is in flight'
+    driver.deleteSid('zgt')
+    driver.scheduled.clear()
+    driver.runtimeState[driver.CATALOG_REFRESH_OWNER_RUNTIME_KEY] = false
+    Map stale = inFlight('stale')
+    driver.completeUpnpCurrent(entry, stale, [status: 200, headers: [sid: 'uuid:zgt-stale', timeout: 'Second-3600']], null)
+
+    then: 'the SID is not installed, no renewal is scheduled, and the granted SID is released on the speaker'
+    driver.getSid('zgt') == null
+    !driver.scheduled.any { List job -> job[1] == 'resubscribeToZgtEvents' }
+    rawRequests.any { String request -> request.startsWith('UNSUBSCRIBE') && request.contains('SID: uuid:zgt-stale') }
+
+    cleanup:
+    driver.upnpRequestQueues.clear()
+  }
+
+  def "a player holding no ZGT subscription releases nothing when it loses the election"() {
+    given:
+    List<String> released = []
+    driver.metaClass.unsubscribeFromZgtEvents = { -> released << 'zgt' }
+    driver.metaClass.unsubscribeFromAlarmClockEvents = { -> released << 'alarmClock' }
+
+    when:
+    driver.zgtElectionResult('wait', 5L)
+    driver.releaseZgtOwnership(5L)
+
+    then:
+    released.isEmpty()
+  }
+
   def "removing a player with no subscriptions or no address sends nothing and does not fail"() {
     given:
     driver.device.dataValues.deviceIp = ''
@@ -3757,7 +3877,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.initialize()
-    driver.zgtElectionResult('proceed')
+    driver.zgtElectionResult('proceed', 1L)
 
     then:
     zgtCalls == ['subscribe']
@@ -3871,7 +3991,7 @@ class SonosAdvPlayerSpec extends Specification {
     zgtCalls.isEmpty()
 
     when:
-    driver.zgtElectionResult('proceed')
+    driver.zgtElectionResult('proceed', 1L)
 
     then:
     catalogRefreshes == 1
@@ -3890,7 +4010,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.initialize()
-    driver.zgtElectionResult('wait')
+    driver.zgtElectionResult('wait', 1L)
 
     then:
     zgtCalls.isEmpty()
@@ -3908,7 +4028,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.initialize()
-    driver.zgtElectionResult(election)
+    driver.zgtElectionResult(election, 1L)
 
     then:
     calls == expected
@@ -3920,6 +4040,9 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   def "AlarmClock subscription queues a SUBSCRIBE with its own SID key and renewal"() {
+    given: 'the election winner owns the AlarmClock subscription'
+    driver.runtimeState[driver.CATALOG_REFRESH_OWNER_RUNTIME_KEY] = true
+
     when:
     driver.subscribeToAlarmClockEvents()
 
@@ -3947,6 +4070,9 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   def "AlarmClock subscribe failure retries through its own retry callback"() {
+    given: 'the election winner owns the AlarmClock subscription'
+    driver.runtimeState[driver.CATALOG_REFRESH_OWNER_RUNTIME_KEY] = true
+
     when:
     driver.subscribeToAlarmClockEvents()
     rawConnections[0].options.inputReader.call('HTTP/1.1 500 Failure\r\n\r\n')
@@ -4025,6 +4151,7 @@ class SonosAdvPlayerSpec extends Specification {
     Map relay = parentPlayerUpdates.find { Map item -> item.kind == 'zgtPayload' }.payload
     relay.followersByCoordinator['RINCON_TEST'] == ['RINCON_B']
     relay.groupNamesById['GROUP-TEST'] == 'Test'
+    relay.requested == true
     driver.zgtMemberHostByPlayerId['RINCON_B'] == '192.168.1.51:1400'
   }
 

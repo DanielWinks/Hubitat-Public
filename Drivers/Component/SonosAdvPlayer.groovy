@@ -1110,6 +1110,9 @@ metadata {
 @Field static final String ZGT_ELIGIBLE_RUNTIME_KEY = 'zgtElectionEligible'
 @Field static final String ZGT_OFFLINE_REPORTED_RUNTIME_KEY = 'zgtOfflineReported'
 @Field static final String CATALOG_REFRESH_OWNER_RUNTIME_KEY = 'catalogRefreshOwner'
+// Highest ZGT election revision this player has acted on; an answer or release carrying a lower one is stale.
+@Field static final String ZGT_REVISION_RUNTIME_KEY = 'zgtElectionRevision'
+@Field static final List<String> ZGT_OWNED_SID_KEYS = ['zgt', 'alarmClock'].asImmutable()
 @Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
 @Field static volatile List<String> cachedTTSVoiceNames = null
@@ -2236,10 +2239,60 @@ void reevaluateZgtElection() {
   if(runtimeState[ZGT_ELIGIBLE_RUNTIME_KEY] == true) { sendParentAppRequest('requestZgtElection') }
 }
 
+/**
+ * Record the election revision an answer carries. Returns false for one older than a revision already acted on,
+ * so a delayed answer or release from an earlier election cannot undo a later one.
+ */
+Boolean acceptZgtRevision(Long revision) {
+  Long incoming = revision ?: 0L
+  synchronized(runtimeState) {
+    Long seen = (runtimeState[ZGT_REVISION_RUNTIME_KEY] ?: 0L) as Long
+    if(incoming < seen) {
+      logDebug("Ignoring a ZGT election answer for revision ${incoming}; revision ${seen} was already acted on")
+      return false
+    }
+    runtimeState[ZGT_REVISION_RUNTIME_KEY] = incoming
+    return true
+  }
+}
+
+/**
+ * Give up the household ZGT and AlarmClock subscriptions; only the elected subscriber may hold them. Work that
+ * would restore them is cancelled too: queued subscribe/renew requests, retries and renewal timers. A SUBSCRIBE
+ * already in flight is released when its response arrives (see completeUpnpCurrent).
+ */
+void releaseZgtOwnership(Long revision) {
+  if(!acceptZgtRevision(revision)) { return }
+  runtimeState[CATALOG_REFRESH_OWNER_RUNTIME_KEY] = false
+  cancelZgtOwnedSubscriptionWork()
+  if(getSid('zgt')) {
+    logInfo('Releasing the ZoneGroupTopology subscription; this player is not the elected subscriber')
+    unsubscribeFromZgtEvents()
+  }
+  if(getSid('alarmClock')) { unsubscribeFromAlarmClockEvents() }
+}
+
+void cancelZgtOwnedSubscriptionWork() {
+  ['retryUpnpZgt', 'retryUpnpAlarmClock', 'subscribeToZgtEvents', 'resubscribeToZgtEvents',
+   'subscribeToAlarmClockEvents', 'resubscribeToAlarmClockEvents'].each { String method -> unschedule(method) }
+  Map entry = upnpRequestQueues.get(getDNI())
+  if(entry == null) { return }
+  synchronized(entry.lock) {
+    ((List<Map>)entry.queue).removeAll { Map queued ->
+      ZGT_OWNED_SID_KEYS.contains(queued.sidKey as String) && queued.operation != 'unsubscribe'
+    }
+  }
+}
+
 /** Parent's answer to requestZgtElection, delivered from an app-side scheduled execution. */
-void zgtElectionResult(String result) {
-  logDebug("Parent ZGT readiness response for ${getDeviceDNI()}: ${result ?: 'none'}")
-  if(result != 'proceed' || runtimeState[ZGT_ELIGIBLE_RUNTIME_KEY] != true) { return }
+void zgtElectionResult(String result, Long revision) {
+  logDebug("Parent ZGT readiness response for ${getDeviceDNI()}: ${result ?: 'none'} (revision ${revision})")
+  if(!acceptZgtRevision(revision)) { return }
+  if(result != 'proceed' || runtimeState[ZGT_ELIGIBLE_RUNTIME_KEY] != true) {
+    // Lost or never won the election: a ZGT or AlarmClock subscription still held here is a duplicate.
+    releaseZgtOwnership(revision)
+    return
+  }
   runtimeState[CATALOG_REFRESH_OWNER_RUNTIME_KEY] = true
   subscribeToZgtEvents()
   // The ZGT election winner also owns the single AlarmClock subscription; no second election.
@@ -5236,6 +5289,7 @@ Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrou
   if(!isPlausibleXmlPayload(xmlString)) { return false }
   Map<String, Object> payload = zgtParse(xmlString)
   if(payload == null) { return false }
+  payload.put('requested', true)
   sendZgtToParent(payload)
   return true
 }
@@ -5244,6 +5298,7 @@ Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> old
   if(topology == null || !(topology.groups instanceof List)) { return false }
   Map<String, Object> payload = zgtPayloadFromGroups((List<Map>)topology.groups)
   if(payload == null) { return false }
+  payload.put('requested', true)
   sendZgtToParent(payload)
   return true
 }
@@ -5706,6 +5761,7 @@ void handleUpnpRawResponse(String raw) {
 void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
   Object socket = null
   Boolean completed = false
+  String staleOwnerSid = null
   synchronized(entry.lock) {
     if(entry.active?.guid != request.guid || request.phase == 'complete' || request.phase == 'expired') { return }
     request.phase = 'complete'
@@ -5722,6 +5778,12 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
         sidRemoved = true
       }
       logDebug("UPnP unsubscribe outcome guid=${request.guid} sidKey=${request.sidKey} status=${status ?: 'none'} sidRemoved=${sidRemoved}")
+    } else if(status == 200 && (sidValue || request.operation == 'renew') &&
+        ZGT_OWNED_SID_KEYS.contains(request.sidKey as String) && !isCatalogRefreshOwner()) {
+      // Ownership was lost while this request was in flight: do not install the lease or schedule renewals.
+      // A granted SID is released once the queue lock is dropped.
+      staleOwnerSid = sidValue
+      logDebug("Discarding UPnP ${request.operation} response guid=${request.guid} sidKey=${request.sidKey}; this player is no longer the elected subscriber")
     } else if(status == 200 && (sidValue || request.operation == 'renew')) {
       if(getSid(request.sidKey as String) == request.expectedCurrentSid) {
         Long timeout = parseGrantedTimeout(headers['timeout'])
@@ -5759,6 +5821,7 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
   }
   if(completed) {
     closeDetachedUpnpSocket(socket, request)
+    if(staleOwnerSid) { unsubscribeOrphanedSid(request.sidKey as String, staleOwnerSid) }
     Boolean released = false
     synchronized(entry.lock) {
       if(entry.active?.guid == request.guid && request.phase == 'complete') {
@@ -5851,6 +5914,10 @@ void retryUpnpRequest(Map data) {
     }
     if((retry.lifecycleGeneration as Long) != (entry.generation as Long)) {
       logDebug("Ignoring stale UPnP retry after lifecycle change guid=${retry.guid}")
+      return
+    }
+    if(ZGT_OWNED_SID_KEYS.contains(retry.sidKey as String) && retry.operation != 'unsubscribe' && !isCatalogRefreshOwner()) {
+      logDebug("Ignoring UPnP ${retry.operation} retry for ${retry.sidKey}; this player is not the elected subscriber")
       return
     }
     retry.guid = UUID.randomUUID().toString()
@@ -6124,6 +6191,7 @@ void subscribeToZgtEvents() {
 
 @CompileStatic
 void resubscribeToZgtEvents() {
+  if(!isCatalogRefreshOwner()) { return }
   String resub = 'resubscribeToZgtEvents'
   String subId = 'zgt'
   String subPath = '/zgt'
@@ -6169,6 +6237,7 @@ void subscribeToAlarmClockEvents() {
 
 @CompileStatic
 void resubscribeToAlarmClockEvents() {
+  if(!isCatalogRefreshOwner()) { return }
   upnpResubscribeGeneric('resubscribeToAlarmClockEvents', 'alarmClock', '/alarmclock',
       ALARM_CLOCK_EVENTS_CALLBACK, ALARM_CLOCK_EVENTS)
 }
